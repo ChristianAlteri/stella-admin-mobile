@@ -1,0 +1,18 @@
+# POS Mobile App Sync
+
+This is the mobile POS app (Expo React Native). It hits the stella-admin API at `/Users/christian/Desktop/stella-admin`.
+
+## When editing this app, check stella-admin if:
+
+1. **API response shape assumptions** — any endpoint under `/api/[storeId]/stripe/*`, `/api/[storeId]/products/point-of-sale`, `/api/[storeId]/staff`, `/api/[storeId]/sellers`, `/api/master-admin/payments/verify-in-store-payment`, or `/api/master-admin/users`.
+2. **Fee rates** — `TERMINAL_FEE_RATES` in `lib/constants.ts` must match `stripe-terminal-v4.tsx` in stella-admin.
+3. **Discount logic** — percent or custom-price discount calculation in `hooks/use-pos.ts` must match `recalcTotals` in stella-admin's `stripe-terminal-v4.tsx`.
+
+## Auth
+- Uses `@clerk/clerk-expo` with the same Clerk instance as stella-admin.
+- API calls include Clerk JWT via Bearer token (set up in `lib/api.ts`).
+
+## Stripe Terminal
+- Uses `@stripe/stripe-terminal-react-native` with `localMobile` discovery (Tap to Pay).
+- Connection token fetched from stella-admin's `/api/[storeId]/stripe/connection_token`.
+- Payment intents created server-side via `/api/[storeId]/stripe/create_payment_intent` (no readerId for mobile).
