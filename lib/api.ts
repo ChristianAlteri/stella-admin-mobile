@@ -1,7 +1,10 @@
 import axios from "axios";
 import { API_BASE_URL } from "./constants";
 
-const api = axios.create({ baseURL: API_BASE_URL });
+const api = axios.create({
+  baseURL: API_BASE_URL,
+  headers: { "ngrok-skip-browser-warning": "1" },
+});
 
 let _getToken: (() => Promise<string | null>) | null = null;
 
@@ -15,9 +18,22 @@ api.interceptors.request.use(async (config) => {
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
+    console.log(`[API] ${config.method?.toUpperCase()} ${config.url} | token: ${token ? token.substring(0, 20) + "..." : "NONE"}`);
+  } else {
+    console.log(`[API] ${config.method?.toUpperCase()} ${config.url} | NO TOKEN GETTER SET`);
   }
   return config;
 });
+
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    if (err.response) {
+      console.log(`[API ERROR] ${err.response.status} ${err.config?.url}`, JSON.stringify(err.response.data).substring(0, 300));
+    }
+    return Promise.reject(err);
+  }
+);
 
 // ---- Store endpoints ----
 

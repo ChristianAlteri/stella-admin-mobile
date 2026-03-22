@@ -14,9 +14,9 @@ import {
 import { useLocalSearchParams, Stack } from "expo-router";
 import {
   useStripeTerminal,
-  Reader,
-  PaymentIntent,
-} from "@stripe/stripe-terminal-react-native";
+  type Reader,
+  type PaymentIntent,
+} from "@/lib/dev-stripe-terminal";
 import {
   searchProducts,
   fetchSellers,

@@ -1,30 +1,22 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Slot, useRouter, useSegments } from "expo-router";
-import { ClerkProvider, ClerkLoaded, useAuth } from "@clerk/clerk-expo";
-import { StripeTerminalProvider } from "@stripe/stripe-terminal-react-native";
-import { tokenProvider } from "@/lib/stripe-terminal";
+import { ClerkAuthProvider, useAuth } from "@/lib/clerk-auth";
 import { setTokenGetter } from "@/lib/api";
-import { CLERK_PUBLISHABLE_KEY } from "@/lib/constants";
-import * as SecureStore from "expo-secure-store";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { StatusBar } from "expo-status-bar";
-
-const tokenCache = {
-  async getToken(key: string) {
-    return SecureStore.getItemAsync(key);
-  },
-  async saveToken(key: string, value: string) {
-    return SecureStore.setItemAsync(key, value);
-  },
-};
 
 function AuthGate() {
   const { isLoaded, isSignedIn, getToken } = useAuth();
   const segments = useSegments();
   const router = useRouter();
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    if (!isLoaded) return;
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isLoaded || !mounted) return;
     const inAuth = segments[0] === "(auth)";
 
     if (!isSignedIn && !inAuth) {
@@ -32,7 +24,7 @@ function AuthGate() {
     } else if (isSignedIn && inAuth) {
       router.replace("/(main)");
     }
-  }, [isLoaded, isSignedIn, segments]);
+  }, [isLoaded, isSignedIn, segments, mounted]);
 
   useEffect(() => {
     if (isSignedIn) {
@@ -46,14 +38,10 @@ function AuthGate() {
 export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY} tokenCache={tokenCache}>
-        <ClerkLoaded>
-          <StripeTerminalProvider tokenProvider={tokenProvider}>
-            <StatusBar style="auto" />
-            <AuthGate />
-          </StripeTerminalProvider>
-        </ClerkLoaded>
-      </ClerkProvider>
+      <ClerkAuthProvider>
+        <StatusBar style="auto" />
+        <AuthGate />
+      </ClerkAuthProvider>
     </GestureHandlerRootView>
   );
 }

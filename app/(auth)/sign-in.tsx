@@ -1,4 +1,4 @@
-import { useSignIn } from "@clerk/clerk-expo";
+import { useSignIn } from "@/lib/clerk-auth";
 import { useState } from "react";
 import {
   View,
@@ -12,23 +12,23 @@ import {
 } from "react-native";
 
 export default function SignInScreen() {
-  const { signIn, setActive, isLoaded } = useSignIn();
+  const { signIn } = useSignIn();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
   const handleSignIn = async () => {
-    if (!isLoaded) return;
+    if (!email || !password) return;
     setError("");
     setLoading(true);
     try {
-      const result = await signIn.create({ identifier: email, password });
-      if (result.status === "complete") {
-        await setActive({ session: result.createdSessionId });
+      const result = await signIn(email, password);
+      if (result.status !== "complete") {
+        setError(result.error || "Sign in incomplete");
       }
     } catch (err: any) {
-      setError(err.errors?.[0]?.longMessage || "Sign in failed");
+      setError(err.message || "Sign in failed");
     } finally {
       setLoading(false);
     }

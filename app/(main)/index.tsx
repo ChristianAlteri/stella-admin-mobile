@@ -8,18 +8,20 @@ import {
   ActivityIndicator,
 } from "react-native";
 import { useRouter } from "expo-router";
-import { useAuth } from "@clerk/clerk-expo";
-import { fetchUserStores } from "@/lib/api";
+import { useAuth } from "@/lib/clerk-auth";
+import { fetchUserStores, setTokenGetter } from "@/lib/api";
 
 export default function StorePickerScreen() {
   const [stores, setStores] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
-  const { signOut } = useAuth();
+  const { signOut, getToken, isSignedIn } = useAuth();
 
   useEffect(() => {
+    if (!isSignedIn) return;
+    setTokenGetter(() => getToken());
     loadStores();
-  }, []);
+  }, [isSignedIn]);
 
   const loadStores = async () => {
     try {

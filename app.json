@@ -31,13 +31,7 @@
     },
     "plugins": [
       "expo-router",
-      "expo-secure-store",
-      [
-        "@stripe/stripe-terminal-react-native",
-        {
-          "tapToPayEnabled": true
-        }
-      ]
+      "expo-secure-store"
     ]
   }
 }
