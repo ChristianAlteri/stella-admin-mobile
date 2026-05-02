@@ -82,7 +82,7 @@ export default function SignInScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#000",
+    backgroundColor: "#fff",
   },
   inner: {
     flex: 1,
@@ -92,34 +92,34 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 32,
     fontWeight: "800",
-    color: "#fff",
+    color: "#0f172a",
     textAlign: "center",
     marginBottom: 4,
   },
   subtitle: {
     fontSize: 16,
-    color: "#94a3b8",
+    color: "#64748b",
     textAlign: "center",
     marginBottom: 32,
   },
   error: {
-    color: "#ef4444",
+    color: "#dc2626",
     fontSize: 14,
     textAlign: "center",
     marginBottom: 16,
   },
   input: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#f8fafc",
     borderRadius: 12,
     padding: 16,
     fontSize: 16,
-    color: "#fff",
+    color: "#0f172a",
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#e2e8f0",
   },
   button: {
-    backgroundColor: "#6366f1",
+    backgroundColor: "#2563eb",
     borderRadius: 12,
     padding: 16,
     alignItems: "center",

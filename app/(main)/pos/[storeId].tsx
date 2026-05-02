@@ -422,6 +422,14 @@ export default function POSScreen() {
     refetchProducts({});
   };
 
+  /** Leave checkout, return to product browser with tile grid (clears tile filter + search). */
+  const handleBackToTilesFromCheckout = () => {
+    setPhase("browse");
+    setActiveTile(null);
+    setSearchQuery("");
+    refetchProducts({});
+  };
+
   // ── derived ──
   const cartCount = pos.cart.reduce((acc, p) => acc + p.cartQuantity, 0);
   const showTiles = !activeTile && !searchQuery.trim() && tiles.length > 0;
@@ -524,155 +532,139 @@ export default function POSScreen() {
     const hasMultiQty = pos.cart.some((p) => p.cartQuantity > 1);
 
     return (
-      <View style={s.container}>
+      <View style={s.checkoutContainer}>
         <Stack.Screen options={{ title: "Checkout" }} />
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 24 }}>
-          {/* Cart items */}
-          <Text style={s.sectionLabel}>{cartCount} item{cartCount !== 1 ? "s" : ""}</Text>
-          {pos.cart.map((item) => (
-            <CartLineItem
-              key={item.id}
-              item={item}
-              currencySymbol={sym}
-              onIncrement={() => pos.updateQuantity(item.id, +1)}
-              onDecrement={() => pos.updateQuantity(item.id, -1)}
-              onRemove={() => pos.removeFromCart(item.id)}
-              onDiscount={() => setDiscountModal({ kind: "item", product: item })}
-            />
-          ))}
 
-          {/* Discount actions */}
-          {!pos.hasAppliedDiscounts && pos.cart.length > 0 && (
-            <TouchableOpacity
-              style={[s.fullWidthBtn, hasMultiQty && s.fullWidthBtnDisabled]}
-              disabled={hasMultiQty}
-              onPress={() => setDiscountModal({ kind: "order" })}
-            >
-              <Text style={s.fullWidthBtnText}>
-                % Apply order-wide discount
-              </Text>
-              {hasMultiQty && (
-                <Text style={s.helperText}>
-                  Set all quantities to 1 first
+        {/* Scrollable content area */}
+        <ScrollView style={s.checkoutScroll} contentContainerStyle={s.checkoutScrollContent}>
+          {/* Header summary card */}
+
+          {/* Sale details section */}
+          <View style={s.checkoutSection}>
+            <Text style={s.checkoutSectionTitle}>Sale details</Text>
+
+            {/* Staff picker */}
+            <TouchableOpacity style={s.checkoutDetailRow} onPress={() => setStaffModalOpen(true)}>
+              <View>
+                <Text style={s.checkoutDetailLabel}>Staff member</Text>
+                <Text style={s.checkoutDetailValue}>
+                  {pos.selectedStaffName || "Select staff…"}
                 </Text>
-              )}
+              </View>
+              <Text style={s.checkoutDetailCaret}>›</Text>
             </TouchableOpacity>
-          )}
 
-          {/* Totals */}
-          <View style={s.totalsBlock}>
-            {showDiscountSavings && (
-              <View style={s.totalRow}>
-                <Text style={s.totalLabel}>Discount savings</Text>
-                <Text style={s.totalValueGreen}>
-                  −{sym}
-                  {pos.discountSavings.toFixed(2)}
+            {/* Customer picker */}
+            <TouchableOpacity style={s.checkoutDetailRow} onPress={() => setCustomerModalOpen(true)}>
+              <View>
+                <Text style={s.checkoutDetailLabel}>Customer</Text>
+                <Text style={[s.checkoutDetailValue, !pos.selectedUserLabel && s.checkoutDetailValueMuted]}>
+                  {pos.selectedUserLabel || "Optional — tap to add"}
+                </Text>
+              </View>
+              <Text style={s.checkoutDetailCaret}>›</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Payment method */}
+          <View style={s.checkoutSection}>
+            <Text style={s.checkoutSectionTitle}>Payment method</Text>
+            <View style={s.checkoutMethodGrid}>
+              <PaymentMethodBtn
+                label="Card"
+                sublabel="Tap to Pay"
+                icon="💳"
+                active={!pos.isCash && !pos.isQr}
+                color="#6366f1"
+                onPress={() => {
+                  pos.setIsCash(false);
+                  pos.setIsQr(false);
+                }}
+              />
+              <PaymentMethodBtn
+                label="Cash"
+                sublabel="No fee"
+                icon="💵"
+                active={pos.isCash}
+                color="#059669"
+                onPress={() => pos.setIsCash(true)}
+              />
+              <PaymentMethodBtn
+                label="QR Code"
+                sublabel="Customer scans"
+                icon="📱"
+                active={pos.isQr}
+                color="#7c3aed"
+                onPress={() => pos.setIsQr(true)}
+              />
+            </View>
+
+            {!pos.isCash && !pos.isQr && !terminalReady && (
+              <View style={s.checkoutWarnPill}>
+                <Text style={s.checkoutWarnText}>
+                  Tap to Pay not available in Expo Go
                 </Text>
               </View>
             )}
-            {pos.serviceFee > 0 && (
-              <>
-                <View style={s.totalRow}>
-                  <Text style={s.totalLabel}>Subtotal</Text>
-                  <Text style={s.totalValue}>
-                    {sym}
-                    {pos.subtotal.toFixed(2)}
-                  </Text>
-                </View>
-                <View style={s.totalRow}>
-                  <Text style={s.totalLabel}>Card processing fee</Text>
-                  <Text style={s.totalValue}>
-                    {sym}
-                    {pos.serviceFee.toFixed(2)}
-                  </Text>
-                </View>
-              </>
+
+            {paymentDeclined && (
+              <View style={s.checkoutErrorBox}>
+                <Text style={s.checkoutErrorTitle}>Payment Declined</Text>
+                {paymentDeclined.message && (
+                  <Text style={s.checkoutErrorMsg}>{paymentDeclined.message}</Text>
+                )}
+              </View>
             )}
-            <View style={s.totalRow}>
-              <Text style={s.grandTotalLabel}>Total</Text>
-              <Text style={s.grandTotalValue}>
-                {sym}
-                {pos.total.toFixed(2)}
-              </Text>
-            </View>
           </View>
 
-          {/* Staff picker */}
-          <Text style={s.sectionLabel}>Sold by</Text>
-          <TouchableOpacity style={s.pickerRow} onPress={() => setStaffModalOpen(true)}>
-            <Text style={s.pickerLabel}>
-              {pos.selectedStaffName || "Select staff…"}
-            </Text>
-            <Text style={s.pickerCaret}>›</Text>
-          </TouchableOpacity>
+          {/* Cart items */}
+          <View style={[s.checkoutSection, s.checkoutSectionLast]}>
+            <Text style={s.checkoutSectionTitle}>Order</Text>
+            {pos.cart.map((item) => (
+              <CartLineItem
+                key={item.id}
+                item={item}
+                currencySymbol={sym}
+                onIncrement={() => pos.updateQuantity(item.id, +1)}
+                onDecrement={() => pos.updateQuantity(item.id, -1)}
+                onRemove={() => pos.removeFromCart(item.id)}
+                onDiscount={() => setDiscountModal({ kind: "item", product: item })}
+              />
+            ))}
 
-          {/* Customer picker */}
-          <Text style={s.sectionLabel}>Customer (optional)</Text>
-          <TouchableOpacity style={s.pickerRow} onPress={() => setCustomerModalOpen(true)}>
-            <Text style={s.pickerLabel}>
-              {pos.selectedUserLabel || "Select customer…"}
-            </Text>
-            <Text style={s.pickerCaret}>›</Text>
-          </TouchableOpacity>
-
-          {/* Payment method */}
-          <Text style={s.sectionLabel}>Payment method</Text>
-          <View style={s.methodRow}>
-            <PaymentMethodBtn
-              label="Card (Tap)"
-              icon="💳"
-              active={!pos.isCash && !pos.isQr}
-              color="#6366f1"
-              onPress={() => {
-                pos.setIsCash(false);
-                pos.setIsQr(false);
-              }}
-            />
-            <PaymentMethodBtn
-              label="Cash"
-              icon="💵"
-              active={pos.isCash}
-              color="#059669"
-              onPress={() => pos.setIsCash(true)}
-            />
-            <PaymentMethodBtn
-              label="QR"
-              icon="📱"
-              active={pos.isQr}
-              color="#7c3aed"
-              onPress={() => pos.setIsQr(true)}
-            />
+            {/* Discount actions */}
+            {!pos.hasAppliedDiscounts && pos.cart.length > 0 && (
+              <TouchableOpacity
+                style={[s.checkoutDiscountBtn, hasMultiQty && s.checkoutDiscountBtnDisabled]}
+                disabled={hasMultiQty}
+                onPress={() => setDiscountModal({ kind: "order" })}
+              >
+                <Text style={s.checkoutDiscountBtnText}>Apply order discount</Text>
+                {hasMultiQty && (
+                  <Text style={s.checkoutDiscountHint}>Set quantities to 1 first</Text>
+                )}
+              </TouchableOpacity>
+            )}
           </View>
 
-          {!pos.isCash && !pos.isQr && !terminalReady && (
-            <View style={s.warnBox}>
-              <Text style={s.warnText}>
-                Tap to Pay not connected. {connectingTerminal ? "Connecting…" : "Use Cash or QR."}
-              </Text>
-            </View>
-          )}
-
-          {paymentDeclined && (
-            <View style={s.errorBox}>
-              <Text style={s.errorTitle}>Payment Declined</Text>
-              {paymentDeclined.message && <Text style={s.errorMsg}>{paymentDeclined.message}</Text>}
-            </View>
-          )}
+          {/* Spacer for footer */}
+          <View style={{ height: 100 }} />
         </ScrollView>
 
-        {/* Charge bar */}
-        <View style={s.chargeBar}>
+        {/* Sticky footer with payment controls */}
+        <View style={s.checkoutFooter}>
           <TouchableOpacity
             style={[
-              s.chargeButton,
-              !pos.selectedStaffId && s.chargeButtonDisabled,
-              pos.isCash && s.chargeButtonCash,
-              pos.isQr && s.chargeButtonQr,
+              s.checkoutChargeBtn,
+              (!pos.selectedStaffId || pos.cart.length === 0) && s.checkoutChargeBtnDisabled,
+              pos.isCash && s.checkoutChargeBtnCash,
+              pos.isQr && s.checkoutChargeBtnQr,
             ]}
             onPress={handleCharge}
             disabled={!pos.selectedStaffId || pos.cart.length === 0}
+            activeOpacity={0.9}
           >
-            <Text style={s.chargeButtonText}>
+            <Text style={s.checkoutChargeBtnText}>
               {pos.isCash
                 ? `Record ${sym}${pos.total.toFixed(2)}`
                 : pos.isQr
@@ -680,9 +672,16 @@ export default function POSScreen() {
                 : `Charge ${sym}${pos.total.toFixed(2)}`}
             </Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => setPhase("browse")}>
-            <Text style={s.backLink}>← Back to products</Text>
-          </TouchableOpacity>
+
+          <View style={s.checkoutFooterLinks}>
+            <TouchableOpacity onPress={handleBackToTilesFromCheckout}>
+              <Text style={s.checkoutFooterLink}>← Back to tiles</Text>
+            </TouchableOpacity>
+            <Text style={s.checkoutFooterDivider}>·</Text>
+            <TouchableOpacity onPress={() => setPhase("browse")}>
+              <Text style={s.checkoutFooterLink}>Keep filters</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* ── Modals ── */}
@@ -1049,12 +1048,14 @@ function CartLineItem({
 
 function PaymentMethodBtn({
   label,
+  sublabel,
   icon,
   active,
   color,
   onPress,
 }: {
   label: string;
+  sublabel?: string;
   icon: string;
   active: boolean;
   color: string;
@@ -1062,11 +1063,19 @@ function PaymentMethodBtn({
 }) {
   return (
     <TouchableOpacity
-      style={[s.methodBtn, active && { backgroundColor: color, borderColor: color }]}
+      style={[s.checkoutMethodBtn, active && { backgroundColor: color, borderColor: color }]}
       onPress={onPress}
+      activeOpacity={0.85}
     >
-      <Text style={s.methodIcon}>{icon}</Text>
-      <Text style={[s.methodLabel, active && s.methodLabelActive]}>{label}</Text>
+      <Text style={s.checkoutMethodIcon}>{icon}</Text>
+      <Text style={[s.checkoutMethodLabel, active && s.checkoutMethodLabelActive]}>
+        {label}
+      </Text>
+      {sublabel && (
+        <Text style={[s.checkoutMethodSublabel, active && s.checkoutMethodSublabelActive]}>
+          {sublabel}
+        </Text>
+      )}
     </TouchableOpacity>
   );
 }
@@ -1094,9 +1103,9 @@ function PickerModal({
           <View style={s.modalHandle} />
           <Text style={s.modalTitle}>{title}</Text>
           <ScrollView style={{ maxHeight: 400 }}>
-            {items.map((item) => (
+            {items.map((item, index) => (
               <TouchableOpacity
-                key={item.id}
+                key={`picker-${item.id || "empty"}-${index}`}
                 style={[s.modalItem, item.id === selectedId && s.modalItemSelected]}
                 onPress={() => onSelect(item)}
               >
@@ -1204,9 +1213,9 @@ function CustomerModal({
                 autoCapitalize="none"
               />
               <ScrollView style={{ maxHeight: 280 }}>
-                {filtered.map((u) => (
+                {filtered.map((u, index) => (
                   <TouchableOpacity
-                    key={u.id}
+                    key={`customer-${u.id ?? "noid"}-${u.email ?? ""}-${index}`}
                     style={[s.modalItem, u.id === selectedId && s.modalItemSelected]}
                     onPress={() => onSelect(u)}
                   >
@@ -1219,9 +1228,11 @@ function CustomerModal({
                     {u.id === selectedId && <Text style={s.modalItemCheck}>✓</Text>}
                   </TouchableOpacity>
                 ))}
-                {filtered.length === 0 && (
-                  <Text style={s.modalEmpty}>No customers match.</Text>
-                )}
+                {filtered.length === 0 ? (
+                  <Text key="customer-list-empty" style={s.modalEmpty}>
+                    No customers match.
+                  </Text>
+                ) : null}
               </ScrollView>
 
               <View style={s.modalActionRow}>
@@ -1541,12 +1552,12 @@ function QuickSaleModal({
 // Styles
 // ─────────────────────────────────────────────────────────────────
 const s = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#000" },
+  container: { flex: 1, backgroundColor: "#fff" },
   centerContainer: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: "#000",
+    backgroundColor: "#fff",
     padding: 32,
   },
   emptyText: { fontSize: 16, color: "#64748b" },
@@ -1555,35 +1566,35 @@ const s = StyleSheet.create({
   searchRow: { flexDirection: "row", paddingHorizontal: 12, paddingTop: 8, gap: 8 },
   searchInput: {
     flex: 1,
-    backgroundColor: "#1e293b",
+    backgroundColor: "#fff",
     borderRadius: 12,
     paddingHorizontal: 14,
     paddingVertical: 12,
     fontSize: 16,
-    color: "#fff",
+    color: "#0f172a",
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#e2e8f0",
   },
   quickSaleBtn: {
     paddingHorizontal: 14,
-    backgroundColor: "#1e293b",
+    backgroundColor: "#2563eb",
     borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#334155",
     justifyContent: "center",
   },
-  quickSaleBtnText: { color: "#a5b4fc", fontWeight: "700", fontSize: 14 },
+  quickSaleBtnText: { color: "#fff", fontWeight: "700", fontSize: 14 },
 
   // breadcrumb
   breadcrumb: {
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
     paddingVertical: 10,
     marginHorizontal: 12,
     marginTop: 8,
-    backgroundColor: "#1e293b",
+    backgroundColor: "#eff6ff",
     borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#dbeafe",
   },
-  breadcrumbText: { color: "#a5b4fc", fontSize: 13, fontWeight: "600" },
+  breadcrumbText: { color: "#2563eb", fontSize: 13, fontWeight: "600" },
 
   // grid
   gridContainer: { padding: 8, paddingBottom: 100 },
@@ -1593,21 +1604,26 @@ const s = StyleSheet.create({
   tileCard: {
     flex: 1,
     aspectRatio: 1,
-    backgroundColor: "#1e293b",
+    backgroundColor: "#fff",
     borderRadius: 14,
     overflow: "hidden",
     marginBottom: 8,
     borderWidth: 2,
-    borderColor: "#475569",
+    borderColor: "#e2e8f0",
     borderStyle: "dashed",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 2,
   },
   tileImage: { width: "100%", height: "100%" },
   tileImagePlaceholder: {
-    backgroundColor: "#334155",
+    backgroundColor: "#f1f5f9",
     justifyContent: "center",
     alignItems: "center",
   },
-  tilePlaceholderText: { fontSize: 48, fontWeight: "800", color: "#64748b" },
+  tilePlaceholderText: { fontSize: 48, fontWeight: "800", color: "#94a3b8" },
   tileOverlay: {
     position: "absolute",
     left: 0,
@@ -1631,30 +1647,35 @@ const s = StyleSheet.create({
   // product card
   productCard: {
     flex: 1,
-    backgroundColor: "#1e293b",
+    backgroundColor: "#fff",
     borderRadius: 12,
     padding: 10,
     marginBottom: 8,
-    borderWidth: 1.5,
-    borderColor: "#334155",
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
   },
-  productCardSelected: { borderColor: "#6366f1" },
-  productCardDisabled: { opacity: 0.6 },
+  productCardSelected: { borderColor: "#2563eb", borderWidth: 2 },
+  productCardDisabled: { opacity: 0.5 },
   productImage: { width: "100%", aspectRatio: 1, borderRadius: 8, marginBottom: 8 },
   productImagePlaceholder: {
-    backgroundColor: "#334155",
+    backgroundColor: "#f1f5f9",
     justifyContent: "center",
     alignItems: "center",
   },
-  productPlaceholderText: { fontSize: 32, fontWeight: "700", color: "#64748b" },
-  productName: { fontSize: 13, fontWeight: "600", color: "#fff", marginBottom: 4 },
-  productPrice: { fontSize: 15, fontWeight: "800", color: "#a5b4fc" },
+  productPlaceholderText: { fontSize: 32, fontWeight: "700", color: "#94a3b8" },
+  productName: { fontSize: 13, fontWeight: "600", color: "#0f172a", marginBottom: 4 },
+  productPrice: { fontSize: 15, fontWeight: "800", color: "#2563eb" },
   productMeta: { fontSize: 11, color: "#64748b", marginTop: 2 },
   cartBadge: {
     position: "absolute",
     top: 6,
     right: 6,
-    backgroundColor: "#6366f1",
+    backgroundColor: "#2563eb",
     borderRadius: 10,
     minWidth: 22,
     height: 22,
@@ -1679,13 +1700,13 @@ const s = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    backgroundColor: "#6366f1",
+    backgroundColor: "#2563eb",
     padding: 18,
     paddingBottom: 34,
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
   },
-  cartBarLabel: { color: "#c7d2fe", fontSize: 13, fontWeight: "600" },
+  cartBarLabel: { color: "#dbeafe", fontSize: 13, fontWeight: "600" },
   cartBarSubLabel: { color: "#fff", fontSize: 16, fontWeight: "800" },
   cartBarSavings: { fontSize: 12, color: "#bbf7d0", fontWeight: "700" },
   cartBarAction: { color: "#fff", fontSize: 16, fontWeight: "800" },
@@ -1694,7 +1715,7 @@ const s = StyleSheet.create({
   sectionLabel: {
     fontSize: 12,
     fontWeight: "700",
-    color: "#94a3b8",
+    color: "#64748b",
     paddingHorizontal: 20,
     paddingTop: 18,
     paddingBottom: 8,
@@ -1703,20 +1724,22 @@ const s = StyleSheet.create({
   },
   cartItem: {
     flexDirection: "row",
-    backgroundColor: "#1e293b",
+    backgroundColor: "#fff",
     borderRadius: 14,
     padding: 14,
     marginHorizontal: 16,
     marginBottom: 8,
     gap: 12,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
   },
-  cartItemName: { fontSize: 15, fontWeight: "700", color: "#fff" },
-  cartItemMeta: { fontSize: 12, color: "#94a3b8", marginTop: 2 },
+  cartItemName: { fontSize: 15, fontWeight: "700", color: "#0f172a" },
+  cartItemMeta: { fontSize: 12, color: "#64748b", marginTop: 2 },
   cartItemPriceCol: { alignItems: "flex-end", justifyContent: "center" },
-  cartItemPrice: { fontSize: 16, fontWeight: "800", color: "#a5b4fc" },
+  cartItemPrice: { fontSize: 16, fontWeight: "800", color: "#2563eb" },
   cartItemPriceStrike: {
     fontSize: 12,
-    color: "#64748b",
+    color: "#94a3b8",
     textDecorationLine: "line-through",
     marginTop: 2,
   },
@@ -1728,52 +1751,55 @@ const s = StyleSheet.create({
     height: 28,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: "#475569",
+    borderColor: "#e2e8f0",
+    backgroundColor: "#fff",
     justifyContent: "center",
     alignItems: "center",
   },
-  qtyBtnText: { color: "#fff", fontSize: 16, fontWeight: "700" },
-  qtyText: { color: "#fff", fontSize: 14, fontWeight: "700", minWidth: 20, textAlign: "center" },
+  qtyBtnText: { color: "#0f172a", fontSize: 16, fontWeight: "700" },
+  qtyText: { color: "#0f172a", fontSize: 14, fontWeight: "700", minWidth: 20, textAlign: "center" },
   qtyDiscountBtn: {
     width: 28,
     height: 28,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: "#475569",
+    borderColor: "#e2e8f0",
+    backgroundColor: "#fff",
     justifyContent: "center",
     alignItems: "center",
     marginLeft: 4,
   },
-  qtyDiscountBtnActive: { backgroundColor: "#fbbf24", borderColor: "#fbbf24" },
+  qtyDiscountBtnActive: { backgroundColor: "#f59e0b", borderColor: "#f59e0b" },
   qtyDiscountBtnDisabled: { opacity: 0.3 },
-  qtyDiscountText: { color: "#fbbf24", fontSize: 14, fontWeight: "800" },
-  qtyDiscountTextActive: { color: "#000" },
+  qtyDiscountText: { color: "#f59e0b", fontSize: 14, fontWeight: "800" },
+  qtyDiscountTextActive: { color: "#fff" },
   qtyRemoveBtn: {
     width: 28,
     height: 28,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: "#475569",
+    borderColor: "#e2e8f0",
+    backgroundColor: "#fff",
     justifyContent: "center",
     alignItems: "center",
     marginLeft: "auto",
   },
-  qtyRemoveText: { color: "#ef4444", fontSize: 16, fontWeight: "800" },
+  qtyRemoveText: { color: "#dc2626", fontSize: 16, fontWeight: "800" },
 
   // full-width helper buttons
   fullWidthBtn: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#fff",
     marginHorizontal: 16,
     marginTop: 4,
     paddingVertical: 12,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#e2e8f0",
     alignItems: "center",
   },
   fullWidthBtnDisabled: { opacity: 0.4 },
-  fullWidthBtnText: { color: "#fbbf24", fontSize: 13, fontWeight: "700" },
-  helperText: { color: "#64748b", fontSize: 11, marginTop: 4 },
+  fullWidthBtnText: { color: "#f59e0b", fontSize: 13, fontWeight: "700" },
+  helperText: { color: "#94a3b8", fontSize: 11, marginTop: 4 },
 
   // totals
   totalsBlock: { paddingHorizontal: 20, paddingTop: 18 },
@@ -1783,26 +1809,26 @@ const s = StyleSheet.create({
     alignItems: "center",
     marginBottom: 8,
   },
-  totalLabel: { fontSize: 14, color: "#94a3b8" },
-  totalValue: { fontSize: 14, color: "#94a3b8" },
-  totalValueGreen: { fontSize: 14, color: "#4ade80", fontWeight: "700" },
-  grandTotalLabel: { fontSize: 22, fontWeight: "800", color: "#fff" },
-  grandTotalValue: { fontSize: 22, fontWeight: "800", color: "#fff" },
+  totalLabel: { fontSize: 14, color: "#64748b" },
+  totalValue: { fontSize: 14, color: "#64748b" },
+  totalValueGreen: { fontSize: 14, color: "#16a34a", fontWeight: "700" },
+  grandTotalLabel: { fontSize: 22, fontWeight: "800", color: "#0f172a" },
+  grandTotalValue: { fontSize: 22, fontWeight: "800", color: "#0f172a" },
 
   // picker rows
   pickerRow: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#1e293b",
+    backgroundColor: "#fff",
     marginHorizontal: 16,
     paddingHorizontal: 16,
     paddingVertical: 14,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#e2e8f0",
     marginBottom: 4,
   },
-  pickerLabel: { color: "#fff", fontSize: 15, flex: 1 },
+  pickerLabel: { color: "#0f172a", fontSize: 15, flex: 1 },
   pickerCaret: { color: "#94a3b8", fontSize: 22, marginLeft: 8 },
 
   // payment method
@@ -1812,56 +1838,66 @@ const s = StyleSheet.create({
     paddingVertical: 14,
     borderRadius: 12,
     borderWidth: 2,
-    borderColor: "#334155",
-    backgroundColor: "#1e293b",
+    borderColor: "#e2e8f0",
+    backgroundColor: "#fff",
     alignItems: "center",
   },
   methodIcon: { fontSize: 22, marginBottom: 4 },
-  methodLabel: { color: "#94a3b8", fontWeight: "700", fontSize: 13 },
+  methodLabel: { color: "#64748b", fontWeight: "700", fontSize: 13 },
   methodLabelActive: { color: "#fff" },
 
   // warn / error boxes
   warnBox: {
-    backgroundColor: "#422006",
+    backgroundColor: "#fef3c7",
     marginHorizontal: 16,
     marginTop: 12,
     padding: 12,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: "#854d0e",
+    borderColor: "#fbbf24",
   },
-  warnText: { color: "#fbbf24", fontSize: 13, textAlign: "center" },
+  warnText: { color: "#92400e", fontSize: 13, textAlign: "center" },
   errorBox: {
-    backgroundColor: "#450a0a",
+    backgroundColor: "#fef2f2",
     marginHorizontal: 16,
     marginTop: 12,
     padding: 12,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: "#7f1d1d",
+    borderColor: "#fca5a5",
   },
-  errorTitle: { color: "#fca5a5", fontSize: 14, fontWeight: "800", textAlign: "center" },
-  errorMsg: { color: "#fecaca", fontSize: 12, textAlign: "center", marginTop: 4 },
+  errorTitle: { color: "#dc2626", fontSize: 14, fontWeight: "800", textAlign: "center" },
+  errorMsg: { color: "#ef4444", fontSize: 12, textAlign: "center", marginTop: 4 },
 
   // charge bar
-  chargeBar: { padding: 20, paddingBottom: 36, backgroundColor: "#0f172a" },
+  chargeBar: { padding: 20, paddingBottom: 36, backgroundColor: "#f8fafc" },
   chargeButton: {
-    backgroundColor: "#6366f1",
+    backgroundColor: "#2563eb",
     borderRadius: 14,
     padding: 18,
     alignItems: "center",
     marginBottom: 10,
   },
-  chargeButtonCash: { backgroundColor: "#059669" },
+  chargeButtonCash: { backgroundColor: "#16a34a" },
   chargeButtonQr: { backgroundColor: "#7c3aed" },
   chargeButtonDisabled: { opacity: 0.4 },
   chargeButtonText: { color: "#fff", fontSize: 17, fontWeight: "800" },
-  backLink: { color: "#94a3b8", fontSize: 13, textAlign: "center" },
+  backToTilesBtn: {
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: "center",
+    marginBottom: 10,
+  },
+  backToTilesBtnText: { color: "#0f172a", fontSize: 15, fontWeight: "700" },
+  backLink: { color: "#64748b", fontSize: 13, textAlign: "center", marginBottom: 4 },
 
   // success
   successContainer: {
     flex: 1,
-    backgroundColor: "#000",
+    backgroundColor: "#fff",
     justifyContent: "center",
     alignItems: "center",
     padding: 32,
@@ -1870,26 +1906,28 @@ const s = StyleSheet.create({
     width: 96,
     height: 96,
     borderRadius: 48,
-    backgroundColor: "#064e3b",
+    backgroundColor: "#dcfce7",
     justifyContent: "center",
     alignItems: "center",
     marginBottom: 16,
   },
-  successCheckIcon: { fontSize: 56, color: "#22c55e", fontWeight: "900" },
-  successTitle: { fontSize: 22, fontWeight: "800", color: "#fff", marginBottom: 4 },
-  successAmount: { fontSize: 40, fontWeight: "900", color: "#4ade80", marginBottom: 14 },
+  successCheckIcon: { fontSize: 56, color: "#16a34a", fontWeight: "900" },
+  successTitle: { fontSize: 22, fontWeight: "800", color: "#0f172a", marginBottom: 4 },
+  successAmount: { fontSize: 40, fontWeight: "900", color: "#16a34a", marginBottom: 14 },
   successMetaRow: { flexDirection: "row", gap: 8, marginBottom: 12 },
   successMetaPill: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#eff6ff",
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#dbeafe",
   },
-  successMetaText: { color: "#a5b4fc", fontSize: 12, fontWeight: "700" },
+  successMetaText: { color: "#2563eb", fontSize: 12, fontWeight: "700" },
   successSubtext: { color: "#64748b", fontSize: 12, marginBottom: 28 },
 
   primaryBtn: {
-    backgroundColor: "#6366f1",
+    backgroundColor: "#2563eb",
     borderRadius: 14,
     paddingVertical: 16,
     paddingHorizontal: 48,
@@ -1897,44 +1935,187 @@ const s = StyleSheet.create({
   primaryBtnText: { color: "#fff", fontSize: 16, fontWeight: "800" },
   secondaryBtn: {
     borderWidth: 1,
-    borderColor: "#7f1d1d",
+    borderColor: "#fca5a5",
     borderRadius: 14,
     paddingVertical: 14,
     paddingHorizontal: 32,
     marginTop: 16,
+    backgroundColor: "#fef2f2",
   },
-  secondaryBtnText: { color: "#fca5a5", fontSize: 14, fontWeight: "700" },
+  secondaryBtnText: { color: "#dc2626", fontSize: 14, fontWeight: "700" },
 
-  processingTitle: { fontSize: 18, fontWeight: "800", color: "#fff", marginTop: 20 },
+  processingTitle: { fontSize: 18, fontWeight: "800", color: "#0f172a", marginTop: 20 },
   processingSubtext: {
     fontSize: 13,
-    color: "#94a3b8",
+    color: "#64748b",
     marginTop: 8,
     textAlign: "center",
     maxWidth: 280,
   },
 
   // qr
-  qrTitle: { fontSize: 18, fontWeight: "700", color: "#fff", marginBottom: 24 },
+  qrTitle: { fontSize: 18, fontWeight: "700", color: "#0f172a", marginBottom: 24 },
   qrFrame: {
     backgroundColor: "#fff",
     padding: 12,
     borderRadius: 16,
     marginBottom: 20,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
   },
   qrImage: { width: 240, height: 240 },
-  qrAmount: { fontSize: 32, fontWeight: "900", color: "#a78bfa", marginBottom: 16 },
+  qrAmount: { fontSize: 32, fontWeight: "900", color: "#2563eb", marginBottom: 16 },
   qrPollingRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  qrPollingText: { color: "#a78bfa", fontSize: 13, fontWeight: "600" },
+  qrPollingText: { color: "#2563eb", fontSize: 13, fontWeight: "600" },
+
+  // Checkout — cleaner layout
+  checkoutContainer: { flex: 1, backgroundColor: "#f8fafc" },
+  checkoutScroll: { flex: 1 },
+  checkoutScrollContent: { paddingHorizontal: 12, paddingTop: 10 },
+
+  checkoutSummaryCard: {
+    backgroundColor: "#fff",
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  checkoutSummaryRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  checkoutItemCount: { fontSize: 15, color: "#64748b", fontWeight: "600" },
+  checkoutTotalDisplay: { fontSize: 32, fontWeight: "800", color: "#0f172a" },
+  checkoutSavings: { fontSize: 14, color: "#16a34a", marginTop: 6, fontWeight: "600" },
+  checkoutFeeNote: { fontSize: 13, color: "#94a3b8", marginTop: 4 },
+
+  checkoutSection: {
+    backgroundColor: "#fff",
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  checkoutSectionLast: { marginBottom: 0 },
+  checkoutSectionTitle: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#64748b",
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+    marginBottom: 10,
+  },
+
+  checkoutDetailRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#f1f5f9",
+  },
+  checkoutDetailLabel: { fontSize: 13, color: "#64748b", marginBottom: 2 },
+  checkoutDetailValue: { fontSize: 16, color: "#0f172a", fontWeight: "600" },
+  checkoutDetailValueMuted: { color: "#94a3b8" },
+  checkoutDetailCaret: { fontSize: 20, color: "#94a3b8", fontWeight: "400" },
+
+  checkoutDiscountBtn: {
+    marginTop: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    backgroundColor: "#f8fafc",
+    alignItems: "center",
+  },
+  checkoutDiscountBtnDisabled: { opacity: 0.4 },
+  checkoutDiscountBtnText: { color: "#0f172a", fontSize: 15, fontWeight: "600" },
+  checkoutDiscountHint: { color: "#94a3b8", fontSize: 12, marginTop: 4 },
+
+  checkoutMethodGrid: { flexDirection: "row", gap: 8 },
+  checkoutMethodBtn: {
+    flex: 1,
+    alignItems: "center",
+    paddingVertical: 14,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: "#e2e8f0",
+    backgroundColor: "#f8fafc",
+  },
+  checkoutMethodIcon: { fontSize: 24, marginBottom: 6 },
+  checkoutMethodLabel: { fontSize: 14, fontWeight: "700", color: "#64748b" },
+  checkoutMethodLabelActive: { color: "#fff" },
+  checkoutMethodSublabel: { fontSize: 11, color: "#94a3b8", marginTop: 2 },
+  checkoutMethodSublabelActive: { color: "rgba(255,255,255,0.9)" },
+
+  checkoutWarnPill: {
+    marginTop: 12,
+    backgroundColor: "#fef3c7",
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    alignSelf: "flex-start",
+    borderWidth: 1,
+    borderColor: "#fbbf24",
+  },
+  checkoutWarnText: { color: "#92400e", fontSize: 13 },
+  checkoutErrorBox: {
+    marginTop: 12,
+    backgroundColor: "#fef2f2",
+    borderRadius: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "#fca5a5",
+  },
+  checkoutErrorTitle: { color: "#dc2626", fontSize: 15, fontWeight: "700" },
+  checkoutErrorMsg: { color: "#ef4444", fontSize: 13, marginTop: 4 },
+
+  // Sticky footer
+  checkoutFooter: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "#fff",
+    borderTopWidth: 1,
+    borderTopColor: "#e2e8f0",
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 28,
+  },
+  checkoutChargeBtn: {
+    backgroundColor: "#2563eb",
+    borderRadius: 14,
+    paddingVertical: 16,
+    alignItems: "center",
+    marginBottom: 10,
+  },
+  checkoutChargeBtnDisabled: { opacity: 0.4 },
+  checkoutChargeBtnCash: { backgroundColor: "#16a34a" },
+  checkoutChargeBtnQr: { backgroundColor: "#7c3aed" },
+  checkoutChargeBtnText: { color: "#fff", fontSize: 18, fontWeight: "800" },
+
+  checkoutFooterLinks: {
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    gap: 12,
+  },
+  checkoutFooterLink: { color: "#64748b", fontSize: 14, fontWeight: "500" },
+  checkoutFooterDivider: { color: "#cbd5e1", fontSize: 14 },
 
   // modals
   modalBackdrop: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.6)",
+    backgroundColor: "rgba(0,0,0,0.4)",
     justifyContent: "flex-end",
   },
   modalSheet: {
-    backgroundColor: "#0f172a",
+    backgroundColor: "#fff",
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     paddingHorizontal: 20,
@@ -1945,30 +2126,30 @@ const s = StyleSheet.create({
     width: 40,
     height: 4,
     borderRadius: 2,
-    backgroundColor: "#475569",
+    backgroundColor: "#cbd5e1",
     alignSelf: "center",
     marginBottom: 16,
   },
-  modalTitle: { fontSize: 20, fontWeight: "800", color: "#fff", marginBottom: 4 },
-  modalSubtext: { fontSize: 12, color: "#94a3b8", marginBottom: 12 },
+  modalTitle: { fontSize: 20, fontWeight: "800", color: "#0f172a", marginBottom: 4 },
+  modalSubtext: { fontSize: 12, color: "#64748b", marginBottom: 12 },
   modalSectionLabel: {
     fontSize: 12,
     fontWeight: "700",
-    color: "#94a3b8",
+    color: "#64748b",
     marginTop: 12,
     marginBottom: 8,
     textTransform: "uppercase",
     letterSpacing: 0.5,
   },
   modalSearchInput: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#f8fafc",
     borderRadius: 10,
     paddingHorizontal: 14,
     paddingVertical: 12,
     fontSize: 15,
-    color: "#fff",
+    color: "#0f172a",
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#e2e8f0",
     marginBottom: 8,
   },
   modalItem: {
@@ -1977,19 +2158,19 @@ const s = StyleSheet.create({
     paddingVertical: 14,
     paddingHorizontal: 4,
     borderBottomWidth: 1,
-    borderBottomColor: "#1e293b",
+    borderBottomColor: "#f1f5f9",
   },
-  modalItemSelected: { backgroundColor: "rgba(99,102,241,0.1)" },
-  modalItemLabel: { fontSize: 15, color: "#fff", flex: 1 },
-  modalItemLabelSelected: { color: "#a5b4fc", fontWeight: "700" },
-  modalItemSub: { fontSize: 12, color: "#94a3b8", marginTop: 2 },
-  modalItemCheck: { fontSize: 18, color: "#6366f1", fontWeight: "800" },
-  modalEmpty: { color: "#64748b", textAlign: "center", paddingVertical: 24 },
+  modalItemSelected: { backgroundColor: "#eff6ff" },
+  modalItemLabel: { fontSize: 15, color: "#0f172a", flex: 1 },
+  modalItemLabelSelected: { color: "#2563eb", fontWeight: "700" },
+  modalItemSub: { fontSize: 12, color: "#64748b", marginTop: 2 },
+  modalItemCheck: { fontSize: 18, color: "#2563eb", fontWeight: "800" },
+  modalEmpty: { color: "#94a3b8", textAlign: "center", paddingVertical: 24 },
 
   modalActionRow: { flexDirection: "row", gap: 8, marginTop: 16 },
   modalPrimaryBtn: {
     flex: 1,
-    backgroundColor: "#6366f1",
+    backgroundColor: "#2563eb",
     paddingVertical: 14,
     borderRadius: 12,
     alignItems: "center",
@@ -1997,16 +2178,16 @@ const s = StyleSheet.create({
   modalPrimaryBtnText: { color: "#fff", fontSize: 15, fontWeight: "800" },
   modalSecondaryBtn: {
     flex: 1,
-    backgroundColor: "#1e293b",
+    backgroundColor: "#f8fafc",
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#e2e8f0",
     paddingVertical: 14,
     borderRadius: 12,
     alignItems: "center",
   },
-  modalSecondaryBtnText: { color: "#94a3b8", fontSize: 14, fontWeight: "700" },
+  modalSecondaryBtnText: { color: "#64748b", fontSize: 14, fontWeight: "700" },
   modalCloseBtn: { paddingVertical: 12, alignItems: "center", marginTop: 8 },
-  modalCloseText: { color: "#64748b", fontSize: 13, fontWeight: "600" },
+  modalCloseText: { color: "#94a3b8", fontSize: 13, fontWeight: "600" },
 
   // discount type toggle
   discountTypeRow: { flexDirection: "row", gap: 8 },
@@ -2015,11 +2196,11 @@ const s = StyleSheet.create({
     paddingVertical: 12,
     borderRadius: 10,
     borderWidth: 2,
-    borderColor: "#334155",
-    backgroundColor: "#1e293b",
+    borderColor: "#e2e8f0",
+    backgroundColor: "#f8fafc",
     alignItems: "center",
   },
-  discountTypeBtnActive: { borderColor: "#fbbf24", backgroundColor: "#422006" },
-  discountTypeText: { color: "#94a3b8", fontWeight: "700" },
-  discountTypeTextActive: { color: "#fbbf24" },
+  discountTypeBtnActive: { borderColor: "#2563eb", backgroundColor: "#eff6ff" },
+  discountTypeText: { color: "#64748b", fontWeight: "700" },
+  discountTypeTextActive: { color: "#2563eb" },
 });

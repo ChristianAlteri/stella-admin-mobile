@@ -37,7 +37,7 @@ export default function StorePickerScreen() {
   if (loading) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" color="#6366f1" />
+        <ActivityIndicator size="large" color="#2563eb" />
       </View>
     );
   }
@@ -85,8 +85,8 @@ export default function StorePickerScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#000" },
-  center: { flex: 1, justifyContent: "center", alignItems: "center" },
+  container: { flex: 1, backgroundColor: "#fff" },
+  center: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#fff" },
   header: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -94,27 +94,35 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingTop: 60,
     paddingBottom: 16,
+    backgroundColor: "#fff",
   },
-  title: { fontSize: 28, fontWeight: "800", color: "#fff" },
-  signOut: { fontSize: 14, color: "#6366f1", fontWeight: "600" },
+  title: { fontSize: 28, fontWeight: "800", color: "#0f172a" },
+  signOut: { fontSize: 14, color: "#2563eb", fontWeight: "600" },
   list: { paddingHorizontal: 20 },
   storeCard: {
-    backgroundColor: "#1e293b",
+    backgroundColor: "#fff",
     borderRadius: 16,
     padding: 20,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: "#334155",
+    borderColor: "#e2e8f0",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 2,
   },
-  storeName: { fontSize: 20, fontWeight: "700", color: "#fff", marginBottom: 8 },
+  storeName: { fontSize: 20, fontWeight: "700", color: "#0f172a", marginBottom: 8 },
   storeMeta: { flexDirection: "row", alignItems: "center", gap: 8 },
-  storeDetail: { fontSize: 14, color: "#94a3b8" },
+  storeDetail: { fontSize: 14, color: "#64748b" },
   badge: {
-    backgroundColor: "#312e81",
+    backgroundColor: "#eff6ff",
+    borderWidth: 1,
+    borderColor: "#dbeafe",
     paddingHorizontal: 8,
     paddingVertical: 2,
     borderRadius: 6,
   },
-  badgeText: { fontSize: 11, color: "#a5b4fc", fontWeight: "600" },
+  badgeText: { fontSize: 11, color: "#2563eb", fontWeight: "600" },
   emptyText: { fontSize: 16, color: "#64748b" },
 });
