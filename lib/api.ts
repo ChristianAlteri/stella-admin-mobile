@@ -18,9 +18,6 @@ api.interceptors.request.use(async (config) => {
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
-    console.log(`[API] ${config.method?.toUpperCase()} ${config.url} | token: ${token ? token.substring(0, 20) + "..." : "NONE"}`);
-  } else {
-    console.log(`[API] ${config.method?.toUpperCase()} ${config.url} | NO TOKEN GETTER SET`);
   }
   return config;
 });
@@ -35,25 +32,79 @@ api.interceptors.response.use(
   }
 );
 
-// ---- Store endpoints ----
+// ---- Stores ----
 
 export async function fetchUserStores(): Promise<any[]> {
   const { data } = await api.get("/api/stores");
   return data;
 }
 
-// ---- POS endpoints ----
+// ---- POS Tiles ----
 
-export async function searchProducts(storeId: string, params: {
+export interface PosTile {
+  id: string;
+  type: "designer" | "category" | "seller" | "productGroup";
+  referenceId: string;
+  label: string;
+  position: number;
+  imageUrl: string | null;
+}
+
+export async function fetchPosTiles(storeId: string): Promise<PosTile[]> {
+  try {
+    const { data } = await api.get(`/api/${storeId}/pos-tiles`);
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+// ---- Products ----
+
+export interface ProductSearchParams {
   q?: string;
   sellerId?: string;
   designerId?: string;
   categoryId?: string;
+  productGroupId?: string;
+  cursor?: string;
   limit?: number;
-}) {
-  const { data } = await api.get(`/api/${storeId}/products/point-of-sale`, { params });
-  return data.products as any[];
 }
+
+export async function searchProducts(storeId: string, params: ProductSearchParams) {
+  const { data } = await api.get(`/api/${storeId}/products/point-of-sale`, { params });
+  return {
+    products: (data.products ?? []) as any[],
+    nextCursor: (data.nextCursor ?? null) as string | null,
+  };
+}
+
+export async function fetchProduct(storeId: string, productId: string) {
+  const { data } = await api.get(`/api/${storeId}/products/${productId}`);
+  return data;
+}
+
+export async function quickAddProduct(storeId: string, payload: {
+  name: string;
+  ourPrice: number;
+  sellerId?: string;
+}) {
+  const { data } = await api.post(`/api/${storeId}/products/quick-add`, {
+    ...payload,
+    isMasterAdmin: false,
+  });
+  return data;
+}
+
+export async function patchProductDiscount(storeId: string, productId: string, payload: {
+  discountType: "PERCENT" | "CUSTOM_PRICE";
+  discountValue: number;
+}) {
+  const { data } = await api.patch(`/api/${storeId}/products/${productId}/discounts`, payload);
+  return data;
+}
+
+// ---- Sellers / Staff / Designers / Categories / Customers ----
 
 export async function fetchSellers(storeId: string) {
   const { data } = await api.get(`/api/${storeId}/sellers`);
@@ -87,7 +138,7 @@ export async function createUser(payload: { name: string; email: string; storeId
   return data;
 }
 
-// ---- Stripe endpoints ----
+// ---- Stripe / Payments ----
 
 export async function fetchConnectionToken(storeId: string): Promise<string> {
   const { data } = await api.get(`/api/${storeId}/stripe/connection_token`);
@@ -114,6 +165,28 @@ export async function verifyInStorePayment(metadata: Record<string, string>, pay
     paymentIntentId,
   });
   return data;
+}
+
+// ---- QR Checkout (alternative to Tap to Pay) ----
+
+export async function createQrCheckout(storeId: string, payload: {
+  products: { id: string; quantity: number }[];
+  soldByStaffId: string;
+  userId?: string;
+  serviceFee?: number;
+}) {
+  const { data } = await api.post(`/api/${storeId}/stripe/create_checkout_qr`, {
+    ...payload,
+    storeId,
+  });
+  return data as { checkoutUrl: string; sessionId: string };
+}
+
+export async function fetchQrCheckoutStatus(storeId: string, sessionId: string) {
+  const { data } = await api.get(`/api/${storeId}/stripe/checkout_qr_status`, {
+    params: { sessionId },
+  });
+  return data as { status?: string; paymentStatus?: string };
 }
 
 export default api;

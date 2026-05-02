@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import {
   View,
   Text,
@@ -10,54 +10,86 @@ import {
   Alert,
   ScrollView,
   Image,
+  Modal,
+  KeyboardAvoidingView,
+  Platform,
 } from "react-native";
 import { useLocalSearchParams, Stack } from "expo-router";
-import {
-  useStripeTerminal,
-  type Reader,
-  type PaymentIntent,
-} from "@/lib/dev-stripe-terminal";
+import { useStripeTerminal } from "@/lib/dev-stripe-terminal";
 import {
   searchProducts,
   fetchSellers,
   fetchStaff,
+  fetchUsers,
+  fetchPosTiles,
+  fetchProduct,
+  quickAddProduct,
+  patchProductDiscount,
   createPaymentIntent,
   verifyInStorePayment,
+  createQrCheckout,
+  fetchQrCheckoutStatus,
+  createUser,
+  type PosTile,
 } from "@/lib/api";
 import { setCurrentStoreId } from "@/lib/stripe-terminal";
-import { usePOS, type POSProduct } from "@/hooks/use-pos";
+import { usePOS, type POSProduct, type CartItem, type DiscountType } from "@/hooks/use-pos";
 import { currencySymbol } from "@/lib/constants";
 
-type Phase = "browse" | "checkout" | "processing" | "success";
+type Phase = "browse" | "checkout" | "processing" | "qr" | "success";
 
+// ─────────────────────────────────────────────────────────────────
+// Main screen
+// ─────────────────────────────────────────────────────────────────
 export default function POSScreen() {
   const { storeId } = useLocalSearchParams<{ storeId: string }>();
   const pos = usePOS();
   const sym = currencySymbol(pos.countryCode);
 
-  // -- data --
-  const [products, setProducts] = useState<POSProduct[]>([]);
-  const [sellers, setSellers] = useState<any[]>([]);
-  const [staff, setStaff] = useState<any[]>([]);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [loading, setLoading] = useState(false);
+  // -- phase --
   const [phase, setPhase] = useState<Phase>("browse");
+
+  // -- products / tiles / search --
+  const [tiles, setTiles] = useState<PosTile[]>([]);
+  const [products, setProducts] = useState<POSProduct[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [activeTile, setActiveTile] = useState<PosTile | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [loadingProducts, setLoadingProducts] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // -- stripe terminal --
+  // -- people --
+  const [staff, setStaff] = useState<any[]>([]);
+  const [users, setUsers] = useState<any[]>([]);
+  const [sellers, setSellers] = useState<any[]>([]);
+
+  // -- modals --
+  const [discountModal, setDiscountModal] = useState<
+    { kind: "item"; product: CartItem } | { kind: "order" } | null
+  >(null);
+  const [customerModalOpen, setCustomerModalOpen] = useState(false);
+  const [staffModalOpen, setStaffModalOpen] = useState(false);
+  const [quickSaleOpen, setQuickSaleOpen] = useState(false);
+
+  // -- payment state --
+  const [paymentDeclined, setPaymentDeclined] = useState<{ message?: string; code?: string } | null>(null);
+  const [qrUrl, setQrUrl] = useState<string | null>(null);
+  const [qrSessionId, setQrSessionId] = useState<string | null>(null);
+  const qrPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // -- stripe terminal (Tap to Pay) --
   const {
     discoverReaders,
     connectLocalMobileReader,
     retrievePaymentIntent,
     collectPaymentMethod,
     confirmPaymentIntent,
-    connectedReader,
   } = useStripeTerminal();
-
   const [terminalReady, setTerminalReady] = useState(false);
   const [connectingTerminal, setConnectingTerminal] = useState(false);
 
-  // -- init --
+  // ── init ──
   useEffect(() => {
     if (!storeId) return;
     setCurrentStoreId(storeId);
@@ -66,18 +98,29 @@ export default function POSScreen() {
   }, [storeId]);
 
   const loadInitialData = async () => {
-    setLoading(true);
+    setLoadingProducts(true);
     try {
-      const [prods, sellersData, staffData] = await Promise.all([
-        searchProducts(storeId!, { limit: 20 }),
-        fetchSellers(storeId!),
-        fetchStaff(storeId!),
+      const [tileRes, productRes, sellerRes, staffRes, userRes] = await Promise.all([
+        fetchPosTiles(storeId!),
+        searchProducts(storeId!, { limit: 30 }),
+        fetchSellers(storeId!).catch(() => []),
+        fetchStaff(storeId!).catch(() => []),
+        fetchUsers(storeId!).catch(() => []),
       ]);
-      setProducts(prods);
-      setSellers(sellersData);
-      setStaff(staffData);
+      setTiles(tileRes);
+      setProducts(productRes.products);
+      setNextCursor(productRes.nextCursor);
+      setSellers(sellerRes);
+      setStaff(staffRes);
+      setUsers(userRes);
 
-      const store = prods[0]?.store;
+      // Auto-select first staff
+      if (staffRes.length > 0 && !pos.selectedStaffId) {
+        pos.setStaff(staffRes[0].id, staffRes[0].name);
+      }
+
+      // Pull store config from first product
+      const store = productRes.products[0]?.store;
       if (store) {
         pos.setStoreConfig(
           store.countryCode || "GB",
@@ -86,17 +129,16 @@ export default function POSScreen() {
       }
     } catch (err) {
       console.error("Failed to load POS data:", err);
+      Alert.alert("Error", "Could not load store data");
     } finally {
-      setLoading(false);
+      setLoadingProducts(false);
     }
   };
 
   const connectToLocalReader = async () => {
     setConnectingTerminal(true);
     try {
-      const { readers } = await discoverReaders({
-        discoveryMethod: "localMobile",
-      });
+      const { readers } = await discoverReaders({ discoveryMethod: "localMobile" });
       if (readers && readers.length > 0) {
         const { reader } = await connectLocalMobileReader({
           reader: readers[0],
@@ -105,62 +147,148 @@ export default function POSScreen() {
         if (reader) setTerminalReady(true);
       }
     } catch (err) {
-      console.error("Terminal connect error:", err);
+      console.log("Terminal not ready (expected in Expo Go):", err);
     } finally {
       setConnectingTerminal(false);
     }
   };
 
-  // -- search --
-  const handleSearch = useCallback(
-    (text: string) => {
-      setSearchQuery(text);
-      if (searchTimeout.current) clearTimeout(searchTimeout.current);
-      searchTimeout.current = setTimeout(async () => {
-        try {
-          const results = await searchProducts(storeId!, { q: text, limit: 20 });
-          setProducts(results);
-        } catch (err) {
-          console.error("Search failed:", err);
+  // ── search / filter ──
+  const refetchProducts = useCallback(
+    async (params: { q?: string; tile?: PosTile | null }) => {
+      setLoadingProducts(true);
+      try {
+        const queryParams: any = { limit: 30 };
+        if (params.q?.trim()) queryParams.q = params.q.trim();
+        if (params.tile) {
+          if (params.tile.type === "designer") queryParams.designerId = params.tile.referenceId;
+          else if (params.tile.type === "category") queryParams.categoryId = params.tile.referenceId;
+          else if (params.tile.type === "seller") queryParams.sellerId = params.tile.referenceId;
+          else if (params.tile.type === "productGroup") queryParams.productGroupId = params.tile.referenceId;
         }
-      }, 300);
+        const res = await searchProducts(storeId!, queryParams);
+        setProducts(res.products);
+        setNextCursor(res.nextCursor);
+      } catch (err) {
+        console.error("Search failed:", err);
+        setProducts([]);
+        setNextCursor(null);
+      } finally {
+        setLoadingProducts(false);
+      }
     },
     [storeId]
   );
 
-  // -- payment --
+  const handleSearchChange = (text: string) => {
+    setSearchQuery(text);
+    if (searchTimeout.current) clearTimeout(searchTimeout.current);
+    searchTimeout.current = setTimeout(() => {
+      refetchProducts({ q: text, tile: activeTile });
+    }, 300);
+  };
+
+  const handleTilePress = (tile: PosTile) => {
+    setActiveTile(tile);
+    setSearchQuery("");
+    refetchProducts({ tile });
+  };
+
+  const clearTile = () => {
+    setActiveTile(null);
+    setSearchQuery("");
+    refetchProducts({});
+  };
+
+  const loadMore = async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const queryParams: any = { limit: 30, cursor: nextCursor };
+      if (searchQuery.trim()) queryParams.q = searchQuery.trim();
+      if (activeTile) {
+        if (activeTile.type === "designer") queryParams.designerId = activeTile.referenceId;
+        else if (activeTile.type === "category") queryParams.categoryId = activeTile.referenceId;
+        else if (activeTile.type === "seller") queryParams.sellerId = activeTile.referenceId;
+        else if (activeTile.type === "productGroup") queryParams.productGroupId = activeTile.referenceId;
+      }
+      const res = await searchProducts(storeId!, queryParams);
+      setProducts((prev) => [...prev, ...res.products]);
+      setNextCursor(res.nextCursor);
+    } catch {
+      setNextCursor(null);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  // ── discounts ──
+  const applyItemDiscountAndPersist = async (
+    product: CartItem,
+    type: DiscountType,
+    value: number
+  ) => {
+    pos.setItemDiscount(product.id, type, value);
+    try {
+      await patchProductDiscount(storeId!, product.id, { discountType: type, discountValue: value });
+      pos.markDiscountsApplied();
+    } catch (err) {
+      console.error("Failed to persist item discount:", err);
+      Alert.alert("Error", "Could not save discount on the server");
+    }
+  };
+
+  const applyOrderDiscountAndPersist = async (type: DiscountType, value: number) => {
+    pos.setOrderDiscount({ type, value });
+    try {
+      await Promise.all(
+        pos.cart.map((item) =>
+          patchProductDiscount(storeId!, item.id, { discountType: type, discountValue: value })
+        )
+      );
+      pos.markDiscountsApplied();
+    } catch (err) {
+      console.error("Failed to persist order discount:", err);
+      Alert.alert("Error", "Could not save order discount on the server");
+    }
+  };
+
+  // ── quick sale ──
+  const handleQuickSaleAdd = async (name: string, price: number, sellerId?: string) => {
+    try {
+      const product = await quickAddProduct(storeId!, { name, ourPrice: price, sellerId });
+      pos.addToCart(product);
+      setQuickSaleOpen(false);
+    } catch (err: any) {
+      console.error("Quick add failed:", err);
+      Alert.alert("Error", err?.response?.data ?? "Could not create product");
+    }
+  };
+
+  // ── checkout actions ──
   const handleCharge = async () => {
-    if (pos.cart.length === 0 || !pos.selectedStaffId) {
-      Alert.alert("Missing info", "Select products and a staff member.");
+    if (pos.cart.length === 0) {
+      Alert.alert("Cart empty", "Add some products first.");
+      return;
+    }
+    if (!pos.selectedStaffId) {
+      Alert.alert("Staff required", "Select who's making this sale.");
       return;
     }
 
-    if (pos.isCash) {
-      await handleCashSale();
-    } else {
-      await handleCardPayment();
-    }
+    if (pos.isCash) await handleCashSale();
+    else if (pos.isQr) await handleQrSale();
+    else await handleCardSale();
   };
 
   const handleCashSale = async () => {
     setPhase("processing");
     try {
-      const metadata: Record<string, string> = {
-        storeId: storeId!,
-        isCash: "true",
-        soldByStaffId: pos.selectedStaffId,
-        userId: pos.selectedUserId || "",
-      };
-      pos.cart.forEach((item, idx) => {
-        metadata[`productId_${idx + 1}`] = item.id;
-        metadata[`productQty_${idx + 1}`] = String(item.cartQuantity);
-      });
-
+      const metadata = buildSaleMetadata();
       const result = await verifyInStorePayment(metadata);
-      if (result.success) {
-        setPhase("success");
-      } else {
-        Alert.alert("Error", result.message || "Cash sale failed");
+      if (result?.success) setPhase("success");
+      else {
+        Alert.alert("Failed", result?.message || "Could not record cash sale");
         setPhase("checkout");
       }
     } catch (err) {
@@ -170,13 +298,15 @@ export default function POSScreen() {
     }
   };
 
-  const handleCardPayment = async () => {
+  const handleCardSale = async () => {
     if (!terminalReady) {
-      Alert.alert("Terminal not ready", "Connecting to Tap to Pay...");
-      connectToLocalReader();
+      Alert.alert(
+        "Tap to Pay not ready",
+        "Tap to Pay requires a development build (not Expo Go). Switch to Cash or QR for now.",
+        [{ text: "OK" }]
+      );
       return;
     }
-
     setPhase("processing");
     try {
       const amountInCents = Math.round(pos.total * 100);
@@ -187,242 +317,511 @@ export default function POSScreen() {
         userId: pos.selectedUserId || undefined,
         isCash: false,
       });
-
       const clientSecret = piResponse.paymentIntent?.client_secret;
-      if (!clientSecret) throw new Error("No client secret returned");
+      if (!clientSecret) throw new Error("No client secret");
 
-      const { paymentIntent: retrievedPI } = await retrievePaymentIntent(clientSecret);
-      const { paymentIntent: collected } = await collectPaymentMethod({ paymentIntent: retrievedPI! });
+      const { paymentIntent: retrieved } = await retrievePaymentIntent(clientSecret);
+      const { paymentIntent: collected } = await collectPaymentMethod({ paymentIntent: retrieved! });
       const { paymentIntent: confirmed } = await confirmPaymentIntent({ paymentIntent: collected! });
 
       if (confirmed?.status === "succeeded" || confirmed?.status === "requires_capture") {
-        const metadata: Record<string, string> = {
-          storeId: storeId!,
-          isCash: "false",
-          soldByStaffId: pos.selectedStaffId,
-          userId: pos.selectedUserId || "",
-        };
-        pos.cart.forEach((item, idx) => {
-          metadata[`productId_${idx + 1}`] = item.id;
-          metadata[`productQty_${idx + 1}`] = String(item.cartQuantity);
-        });
-
-        await verifyInStorePayment(metadata, confirmed?.id);
+        await verifyInStorePayment(buildSaleMetadata(), confirmed?.id);
         setPhase("success");
       } else {
-        Alert.alert("Payment failed", "The payment was not completed.");
+        setPaymentDeclined({ message: "Payment was not completed" });
         setPhase("checkout");
       }
     } catch (err: any) {
       console.error("Card payment error:", err);
-      Alert.alert("Payment error", err.message || "Something went wrong");
+      setPaymentDeclined({ message: err.message || "Payment failed" });
       setPhase("checkout");
     }
+  };
+
+  const handleQrSale = async () => {
+    try {
+      const res = await createQrCheckout(storeId!, {
+        products: pos.cart.map((p) => ({ id: p.id, quantity: p.cartQuantity })),
+        soldByStaffId: pos.selectedStaffId,
+        userId: pos.selectedUserId || undefined,
+        serviceFee: pos.serviceFee > 0 ? pos.serviceFee : undefined,
+      });
+      setQrUrl(res.checkoutUrl);
+      setQrSessionId(res.sessionId);
+      setPhase("qr");
+    } catch (err: any) {
+      console.error("QR checkout error:", err);
+      Alert.alert("Error", err?.response?.data?.error || "Could not generate QR");
+    }
+  };
+
+  const cancelQrCheckout = () => {
+    if (qrPollingRef.current) {
+      clearInterval(qrPollingRef.current);
+      qrPollingRef.current = null;
+    }
+    setQrUrl(null);
+    setQrSessionId(null);
+    setPhase("checkout");
+  };
+
+  // poll QR status
+  useEffect(() => {
+    if (!qrSessionId || phase !== "qr") {
+      if (qrPollingRef.current) clearInterval(qrPollingRef.current);
+      qrPollingRef.current = null;
+      return;
+    }
+    qrPollingRef.current = setInterval(async () => {
+      try {
+        const data = await fetchQrCheckoutStatus(storeId!, qrSessionId);
+        if (data.paymentStatus === "paid" || data.status === "complete") {
+          if (qrPollingRef.current) clearInterval(qrPollingRef.current);
+          qrPollingRef.current = null;
+          setQrUrl(null);
+          setQrSessionId(null);
+          setPhase("success");
+        } else if (data.status === "expired") {
+          if (qrPollingRef.current) clearInterval(qrPollingRef.current);
+          qrPollingRef.current = null;
+          setQrUrl(null);
+          setQrSessionId(null);
+          Alert.alert("Expired", "Payment link expired. Try again.");
+          setPhase("checkout");
+        }
+      } catch (e) {
+        console.error("QR poll:", e);
+      }
+    }, 3000);
+    return () => {
+      if (qrPollingRef.current) clearInterval(qrPollingRef.current);
+      qrPollingRef.current = null;
+    };
+  }, [qrSessionId, phase, storeId]);
+
+  const buildSaleMetadata = (): Record<string, string> => {
+    const m: Record<string, string> = {
+      storeId: storeId!,
+      isCash: pos.isCash ? "true" : "false",
+      soldByStaffId: pos.selectedStaffId,
+      userId: pos.selectedUserId || "",
+    };
+    pos.cart.forEach((item, idx) => {
+      m[`productId_${idx + 1}`] = item.id;
+      m[`productQty_${idx + 1}`] = String(item.cartQuantity);
+    });
+    return m;
   };
 
   const handleNewSale = () => {
     pos.clearCart();
     setPhase("browse");
-    loadInitialData();
+    setActiveTile(null);
+    setSearchQuery("");
+    setPaymentDeclined(null);
+    refetchProducts({});
   };
 
-  // -- render --
+  // ── derived ──
+  const cartCount = pos.cart.reduce((acc, p) => acc + p.cartQuantity, 0);
+  const showTiles = !activeTile && !searchQuery.trim() && tiles.length > 0;
+
+  // ─────────────────────────────────────────────────────────
+  // Render: Success
+  // ─────────────────────────────────────────────────────────
   if (phase === "success") {
     return (
-      <View style={styles.centerContainer}>
-        <Stack.Screen options={{ title: "Sale Complete" }} />
-        <Text style={styles.successIcon}>✓</Text>
-        <Text style={styles.successTitle}>Sale Complete</Text>
-        <Text style={styles.successAmount}>
-          {sym}{pos.total.toFixed(2)}
+      <View style={s.successContainer}>
+        <Stack.Screen options={{ title: "Sale Complete", headerBackVisible: false }} />
+        <View style={s.successCheck}>
+          <Text style={s.successCheckIcon}>✓</Text>
+        </View>
+        <Text style={s.successTitle}>Payment Approved</Text>
+        <Text style={s.successAmount}>
+          {sym}
+          {pos.total.toFixed(2)}
         </Text>
-        <TouchableOpacity style={styles.primaryButton} onPress={handleNewSale}>
-          <Text style={styles.primaryButtonText}>New Sale</Text>
+        <View style={s.successMetaRow}>
+          <View style={s.successMetaPill}>
+            <Text style={s.successMetaText}>
+              {pos.isCash ? "Cash" : pos.isQr ? "QR Payment" : "Card"}
+            </Text>
+          </View>
+          {pos.selectedStaffName ? (
+            <View style={s.successMetaPill}>
+              <Text style={s.successMetaText}>{pos.selectedStaffName}</Text>
+            </View>
+          ) : null}
+        </View>
+        <Text style={s.successSubtext}>Order recorded · inventory updated</Text>
+        <TouchableOpacity style={s.primaryBtn} onPress={handleNewSale}>
+          <Text style={s.primaryBtnText}>↻  New Sale</Text>
         </TouchableOpacity>
       </View>
     );
   }
 
+  // ─────────────────────────────────────────────────────────
+  // Render: Processing
+  // ─────────────────────────────────────────────────────────
   if (phase === "processing") {
     return (
-      <View style={styles.centerContainer}>
-        <Stack.Screen options={{ title: "Processing..." }} />
+      <View style={s.successContainer}>
+        <Stack.Screen options={{ title: "Processing…" }} />
         <ActivityIndicator size="large" color="#6366f1" />
-        <Text style={styles.processingText}>
-          {pos.isCash ? "Recording sale..." : "Waiting for tap..."}
+        <Text style={s.processingTitle}>
+          {pos.isCash ? "Recording sale…" : "Waiting for tap…"}
         </Text>
-        <Text style={styles.processingSubtext}>
-          {pos.isCash ? "" : "Hold the customer's card near the phone"}
+        <Text style={s.processingSubtext}>
+          {pos.isCash
+            ? "Verifying with the server"
+            : "Hold the customer's card near the back of your phone"}
         </Text>
       </View>
     );
   }
 
-  if (phase === "checkout") {
+  // ─────────────────────────────────────────────────────────
+  // Render: QR
+  // ─────────────────────────────────────────────────────────
+  if (phase === "qr" && qrUrl) {
     return (
-      <View style={styles.container}>
+      <View style={s.successContainer}>
+        <Stack.Screen options={{ title: "Customer Pays" }} />
+        <Text style={s.qrTitle}>Customer scans to pay</Text>
+        <View style={s.qrFrame}>
+          <Image
+            source={{
+              uri: `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(qrUrl)}&margin=10`,
+            }}
+            style={s.qrImage}
+          />
+        </View>
+        <Text style={s.qrAmount}>
+          {sym}
+          {pos.total.toFixed(2)}
+        </Text>
+        <View style={s.qrPollingRow}>
+          <ActivityIndicator size="small" color="#a78bfa" />
+          <Text style={s.qrPollingText}>Waiting for payment…</Text>
+        </View>
+        <TouchableOpacity style={s.secondaryBtn} onPress={cancelQrCheckout}>
+          <Text style={s.secondaryBtnText}>Cancel</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // Render: Checkout
+  // ─────────────────────────────────────────────────────────
+  if (phase === "checkout") {
+    const subtotalGrossWithoutDiscount = pos.cart.reduce(
+      (a, i) => a + Number(i.ourPrice) * i.cartQuantity,
+      0
+    );
+    const showDiscountSavings = pos.discountSavings > 0;
+    const hasMultiQty = pos.cart.some((p) => p.cartQuantity > 1);
+
+    return (
+      <View style={s.container}>
         <Stack.Screen options={{ title: "Checkout" }} />
-        <ScrollView style={styles.checkoutScroll}>
-          {/* Cart summary */}
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 24 }}>
+          {/* Cart items */}
+          <Text style={s.sectionLabel}>{cartCount} item{cartCount !== 1 ? "s" : ""}</Text>
           {pos.cart.map((item) => (
-            <View key={item.id} style={styles.checkoutItem}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.checkoutItemName}>{item.name}</Text>
-                <Text style={styles.checkoutItemMeta}>
-                  {sym}{item.ourPrice.toFixed(2)} × {item.cartQuantity}
-                </Text>
-              </View>
-              <Text style={styles.checkoutItemTotal}>
-                {sym}{(item.ourPrice * item.cartQuantity).toFixed(2)}
-              </Text>
-            </View>
+            <CartLineItem
+              key={item.id}
+              item={item}
+              currencySymbol={sym}
+              onIncrement={() => pos.updateQuantity(item.id, +1)}
+              onDecrement={() => pos.updateQuantity(item.id, -1)}
+              onRemove={() => pos.removeFromCart(item.id)}
+              onDiscount={() => setDiscountModal({ kind: "item", product: item })}
+            />
           ))}
 
+          {/* Discount actions */}
+          {!pos.hasAppliedDiscounts && pos.cart.length > 0 && (
+            <TouchableOpacity
+              style={[s.fullWidthBtn, hasMultiQty && s.fullWidthBtnDisabled]}
+              disabled={hasMultiQty}
+              onPress={() => setDiscountModal({ kind: "order" })}
+            >
+              <Text style={s.fullWidthBtnText}>
+                % Apply order-wide discount
+              </Text>
+              {hasMultiQty && (
+                <Text style={s.helperText}>
+                  Set all quantities to 1 first
+                </Text>
+              )}
+            </TouchableOpacity>
+          )}
+
           {/* Totals */}
-          <View style={styles.totalsSection}>
+          <View style={s.totalsBlock}>
+            {showDiscountSavings && (
+              <View style={s.totalRow}>
+                <Text style={s.totalLabel}>Discount savings</Text>
+                <Text style={s.totalValueGreen}>
+                  −{sym}
+                  {pos.discountSavings.toFixed(2)}
+                </Text>
+              </View>
+            )}
             {pos.serviceFee > 0 && (
               <>
-                <View style={styles.totalRow}>
-                  <Text style={styles.totalLabel}>Subtotal</Text>
-                  <Text style={styles.totalValue}>{sym}{pos.subtotal.toFixed(2)}</Text>
+                <View style={s.totalRow}>
+                  <Text style={s.totalLabel}>Subtotal</Text>
+                  <Text style={s.totalValue}>
+                    {sym}
+                    {pos.subtotal.toFixed(2)}
+                  </Text>
                 </View>
-                <View style={styles.totalRow}>
-                  <Text style={styles.totalLabel}>Card processing fee</Text>
-                  <Text style={styles.totalValue}>{sym}{pos.serviceFee.toFixed(2)}</Text>
+                <View style={s.totalRow}>
+                  <Text style={s.totalLabel}>Card processing fee</Text>
+                  <Text style={s.totalValue}>
+                    {sym}
+                    {pos.serviceFee.toFixed(2)}
+                  </Text>
                 </View>
               </>
             )}
-            <View style={styles.totalRow}>
-              <Text style={styles.grandTotalLabel}>Total</Text>
-              <Text style={styles.grandTotalValue}>{sym}{pos.total.toFixed(2)}</Text>
+            <View style={s.totalRow}>
+              <Text style={s.grandTotalLabel}>Total</Text>
+              <Text style={s.grandTotalValue}>
+                {sym}
+                {pos.total.toFixed(2)}
+              </Text>
             </View>
           </View>
 
+          {/* Staff picker */}
+          <Text style={s.sectionLabel}>Sold by</Text>
+          <TouchableOpacity style={s.pickerRow} onPress={() => setStaffModalOpen(true)}>
+            <Text style={s.pickerLabel}>
+              {pos.selectedStaffName || "Select staff…"}
+            </Text>
+            <Text style={s.pickerCaret}>›</Text>
+          </TouchableOpacity>
+
+          {/* Customer picker */}
+          <Text style={s.sectionLabel}>Customer (optional)</Text>
+          <TouchableOpacity style={s.pickerRow} onPress={() => setCustomerModalOpen(true)}>
+            <Text style={s.pickerLabel}>
+              {pos.selectedUserLabel || "Select customer…"}
+            </Text>
+            <Text style={s.pickerCaret}>›</Text>
+          </TouchableOpacity>
+
           {/* Payment method */}
-          <View style={styles.paymentMethodRow}>
-            <TouchableOpacity
-              style={[styles.methodBtn, !pos.isCash && styles.methodBtnActive]}
-              onPress={() => pos.setIsCash(false)}
-            >
-              <Text style={[styles.methodText, !pos.isCash && styles.methodTextActive]}>
-                Card (Tap)
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.methodBtn, pos.isCash && styles.methodBtnCashActive]}
+          <Text style={s.sectionLabel}>Payment method</Text>
+          <View style={s.methodRow}>
+            <PaymentMethodBtn
+              label="Card (Tap)"
+              icon="💳"
+              active={!pos.isCash && !pos.isQr}
+              color="#6366f1"
+              onPress={() => {
+                pos.setIsCash(false);
+                pos.setIsQr(false);
+              }}
+            />
+            <PaymentMethodBtn
+              label="Cash"
+              icon="💵"
+              active={pos.isCash}
+              color="#059669"
               onPress={() => pos.setIsCash(true)}
-            >
-              <Text style={[styles.methodText, pos.isCash && styles.methodTextActive]}>
-                Cash
-              </Text>
-            </TouchableOpacity>
+            />
+            <PaymentMethodBtn
+              label="QR"
+              icon="📱"
+              active={pos.isQr}
+              color="#7c3aed"
+              onPress={() => pos.setIsQr(true)}
+            />
           </View>
 
-          {/* Staff picker */}
-          <Text style={styles.sectionTitle}>Sold by</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
-            {staff.map((s) => (
-              <TouchableOpacity
-                key={s.id}
-                style={[styles.chip, pos.selectedStaffId === s.id && styles.chipActive]}
-                onPress={() => pos.setStaff(s.id, s.name)}
-              >
-                <Text
-                  style={[styles.chipText, pos.selectedStaffId === s.id && styles.chipTextActive]}
-                >
-                  {s.name}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-
-          {!pos.isCash && !terminalReady && (
-            <View style={styles.warningBox}>
-              <Text style={styles.warningText}>
-                Tap to Pay not connected. {connectingTerminal ? "Connecting..." : "Tap 'Charge' to retry."}
+          {!pos.isCash && !pos.isQr && !terminalReady && (
+            <View style={s.warnBox}>
+              <Text style={s.warnText}>
+                Tap to Pay not connected. {connectingTerminal ? "Connecting…" : "Use Cash or QR."}
               </Text>
+            </View>
+          )}
+
+          {paymentDeclined && (
+            <View style={s.errorBox}>
+              <Text style={s.errorTitle}>Payment Declined</Text>
+              {paymentDeclined.message && <Text style={s.errorMsg}>{paymentDeclined.message}</Text>}
             </View>
           )}
         </ScrollView>
 
-        {/* Charge button */}
-        <View style={styles.chargeBar}>
+        {/* Charge bar */}
+        <View style={s.chargeBar}>
           <TouchableOpacity
-            style={[styles.chargeButton, !pos.selectedStaffId && styles.chargeButtonDisabled]}
+            style={[
+              s.chargeButton,
+              !pos.selectedStaffId && s.chargeButtonDisabled,
+              pos.isCash && s.chargeButtonCash,
+              pos.isQr && s.chargeButtonQr,
+            ]}
             onPress={handleCharge}
-            disabled={!pos.selectedStaffId}
+            disabled={!pos.selectedStaffId || pos.cart.length === 0}
           >
-            <Text style={styles.chargeButtonText}>
-              {pos.isCash ? "Record Cash Sale" : "Charge"} {sym}{pos.total.toFixed(2)}
+            <Text style={s.chargeButtonText}>
+              {pos.isCash
+                ? `Record ${sym}${pos.total.toFixed(2)}`
+                : pos.isQr
+                ? `Generate QR · ${sym}${pos.total.toFixed(2)}`
+                : `Charge ${sym}${pos.total.toFixed(2)}`}
             </Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.backButton} onPress={() => setPhase("browse")}>
-            <Text style={styles.backButtonText}>Back to products</Text>
+          <TouchableOpacity onPress={() => setPhase("browse")}>
+            <Text style={s.backLink}>← Back to products</Text>
           </TouchableOpacity>
         </View>
+
+        {/* ── Modals ── */}
+        <DiscountModal
+          modal={discountModal}
+          onClose={() => setDiscountModal(null)}
+          onApplyItem={async (product, type, value) => {
+            await applyItemDiscountAndPersist(product, type, value);
+            setDiscountModal(null);
+          }}
+          onClearItem={(product) => {
+            pos.clearItemDiscount(product.id);
+            setDiscountModal(null);
+          }}
+          onApplyOrder={async (type, value) => {
+            await applyOrderDiscountAndPersist(type, value);
+            setDiscountModal(null);
+          }}
+          onClearOrder={() => {
+            pos.clearOrderDiscount();
+            setDiscountModal(null);
+          }}
+          currencySymbol={sym}
+        />
+        <PickerModal
+          visible={staffModalOpen}
+          onClose={() => setStaffModalOpen(false)}
+          title="Select staff member"
+          items={staff.map((m) => ({ id: m.id, label: m.name }))}
+          selectedId={pos.selectedStaffId}
+          onSelect={(item) => {
+            pos.setStaff(item.id, item.label);
+            setStaffModalOpen(false);
+          }}
+        />
+        <CustomerModal
+          visible={customerModalOpen}
+          users={users}
+          selectedId={pos.selectedUserId}
+          storeId={storeId!}
+          onClose={() => setCustomerModalOpen(false)}
+          onSelect={(user) => {
+            pos.setUser(user.id, user.email || user.name || "Customer");
+            setCustomerModalOpen(false);
+          }}
+          onClear={() => {
+            pos.setUser("", "");
+            setCustomerModalOpen(false);
+          }}
+          onCreated={(user) => {
+            setUsers((prev) => [...prev, user]);
+            pos.setUser(user.id, user.email || user.name || "Customer");
+            setCustomerModalOpen(false);
+          }}
+        />
       </View>
     );
   }
 
-  // -- browse phase (default) --
+  // ─────────────────────────────────────────────────────────
+  // Render: Browse (default)
+  // ─────────────────────────────────────────────────────────
   return (
-    <View style={styles.container}>
+    <View style={s.container}>
       <Stack.Screen options={{ title: "Point of Sale", headerBackTitle: "Stores" }} />
 
-      {/* Search */}
-      <View style={styles.searchBar}>
+      {/* Search + Quick Sale */}
+      <View style={s.searchRow}>
         <TextInput
-          style={styles.searchInput}
-          placeholder="Search products..."
+          style={s.searchInput}
+          placeholder={
+            activeTile ? `Search in ${activeTile.label}…` : "Search products…"
+          }
           placeholderTextColor="#64748b"
           value={searchQuery}
-          onChangeText={handleSearch}
+          onChangeText={handleSearchChange}
           autoCorrect={false}
+          autoCapitalize="none"
         />
+        <TouchableOpacity style={s.quickSaleBtn} onPress={() => setQuickSaleOpen(true)}>
+          <Text style={s.quickSaleBtnText}>+ Quick</Text>
+        </TouchableOpacity>
       </View>
 
-      {/* Product grid */}
-      {loading ? (
-        <View style={styles.centerContainer}>
+      {/* Tile breadcrumb */}
+      {activeTile && (
+        <TouchableOpacity style={s.breadcrumb} onPress={clearTile}>
+          <Text style={s.breadcrumbText}>← Back to tiles · {activeTile.label}</Text>
+        </TouchableOpacity>
+      )}
+
+      {/* Grid */}
+      {loadingProducts ? (
+        <View style={s.centerContainer}>
           <ActivityIndicator size="large" color="#6366f1" />
         </View>
       ) : (
         <FlatList
-          data={products}
-          keyExtractor={(item) => item.id}
+          data={[
+            ...(showTiles
+              ? tiles.map((t) => ({ kind: "tile" as const, tile: t }))
+              : []),
+            ...products.map((p) => ({ kind: "product" as const, product: p })),
+          ]}
+          keyExtractor={(item) =>
+            item.kind === "tile" ? `tile-${item.tile.id}` : `product-${item.product.id}`
+          }
           numColumns={2}
-          contentContainerStyle={styles.productGrid}
-          columnWrapperStyle={styles.productRow}
+          columnWrapperStyle={s.gridRow}
+          contentContainerStyle={s.gridContainer}
           renderItem={({ item }) => {
-            const inCart = pos.cart.find((c) => c.id === item.id);
+            if (item.kind === "tile") {
+              return <TileCard tile={item.tile} onPress={() => handleTilePress(item.tile)} />;
+            }
+            const p = item.product;
+            const inCart = pos.cart.find((c) => c.id === p.id);
+            const noStripe = !p.store?.stripe_connect_unique_id;
             return (
-              <TouchableOpacity
-                style={[styles.productCard, inCart && styles.productCardSelected]}
-                onPress={() => pos.addToCart(item)}
-              >
-                {item.images?.[0]?.url ? (
-                  <Image source={{ uri: item.images[0].url }} style={styles.productImage} />
-                ) : (
-                  <View style={[styles.productImage, styles.productImagePlaceholder]}>
-                    <Text style={styles.placeholderText}>No img</Text>
-                  </View>
-                )}
-                <Text style={styles.productName} numberOfLines={2}>{item.name}</Text>
-                <Text style={styles.productPrice}>{sym}{item.ourPrice?.toFixed(2)}</Text>
-                {item.designer?.name && (
-                  <Text style={styles.productDesigner} numberOfLines={1}>{item.designer.name}</Text>
-                )}
-                {inCart && (
-                  <View style={styles.cartBadge}>
-                    <Text style={styles.cartBadgeText}>{inCart.cartQuantity}</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
+              <ProductCard
+                product={p}
+                inCart={inCart?.cartQuantity}
+                disabled={noStripe}
+                currencySymbol={sym}
+                onPress={() => pos.addToCart(p)}
+              />
             );
           }}
+          onEndReached={loadMore}
+          onEndReachedThreshold={0.5}
+          ListFooterComponent={
+            loadingMore ? (
+              <View style={{ padding: 16 }}>
+                <ActivityIndicator color="#6366f1" />
+              </View>
+            ) : null
+          }
           ListEmptyComponent={
-            <View style={styles.centerContainer}>
-              <Text style={styles.emptyText}>No products found</Text>
+            <View style={s.centerContainer}>
+              <Text style={s.emptyText}>No products found</Text>
             </View>
           }
         />
@@ -430,38 +829,806 @@ export default function POSScreen() {
 
       {/* Cart bar */}
       {pos.cart.length > 0 && (
-        <TouchableOpacity style={styles.cartBar} onPress={() => setPhase("checkout")}>
-          <Text style={styles.cartBarText}>
-            {pos.cart.reduce((a, i) => a + i.cartQuantity, 0)} items
-          </Text>
-          <Text style={styles.cartBarTotal}>
-            Checkout · {sym}{pos.subtotal.toFixed(2)}
-          </Text>
+        <TouchableOpacity style={s.cartBar} onPress={() => setPhase("checkout")}>
+          <View>
+            <Text style={s.cartBarLabel}>{cartCount} items</Text>
+            <Text style={s.cartBarSubLabel}>
+              {sym}
+              {pos.subtotal.toFixed(2)}
+              {pos.discountSavings > 0 && (
+                <Text style={s.cartBarSavings}>
+                  {"  "}saved {sym}
+                  {pos.discountSavings.toFixed(2)}
+                </Text>
+              )}
+            </Text>
+          </View>
+          <Text style={s.cartBarAction}>Checkout →</Text>
         </TouchableOpacity>
       )}
+
+      {/* Quick Sale Modal */}
+      <QuickSaleModal
+        visible={quickSaleOpen}
+        sellers={sellers}
+        currencySymbol={sym}
+        onClose={() => setQuickSaleOpen(false)}
+        onAdd={handleQuickSaleAdd}
+      />
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#000" },
-  centerContainer: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000", padding: 32 },
+// ─────────────────────────────────────────────────────────────────
+// Sub-components
+// ─────────────────────────────────────────────────────────────────
 
-  // search
-  searchBar: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 4 },
+function TileCard({ tile, onPress }: { tile: PosTile; onPress: () => void }) {
+  return (
+    <TouchableOpacity style={s.tileCard} onPress={onPress}>
+      {tile.imageUrl ? (
+        <Image source={{ uri: tile.imageUrl }} style={s.tileImage} />
+      ) : (
+        <View style={[s.tileImage, s.tileImagePlaceholder]}>
+          <Text style={s.tilePlaceholderText}>{tile.label[0]?.toUpperCase()}</Text>
+        </View>
+      )}
+      <View style={s.tileOverlay}>
+        <Text style={s.tileLabel} numberOfLines={2}>
+          {tile.label}
+        </Text>
+      </View>
+      <View style={[s.tileBadge, { backgroundColor: tileColor(tile.type) }]}>
+        <Text style={s.tileBadgeText}>{tileLabel(tile.type)}</Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+function tileColor(type: string) {
+  switch (type) {
+    case "designer": return "#8b5cf6";
+    case "category": return "#0ea5e9";
+    case "productGroup": return "#f59e0b";
+    case "seller": return "#10b981";
+    default: return "#64748b";
+  }
+}
+
+function tileLabel(type: string) {
+  switch (type) {
+    case "designer": return "Designer";
+    case "category": return "Category";
+    case "productGroup": return "Group";
+    case "seller": return "Seller";
+    default: return "Tile";
+  }
+}
+
+function ProductCard({
+  product,
+  inCart,
+  disabled,
+  currencySymbol: sym,
+  onPress,
+}: {
+  product: POSProduct;
+  inCart?: number;
+  disabled?: boolean;
+  currencySymbol: string;
+  onPress: () => void;
+}) {
+  return (
+    <TouchableOpacity
+      style={[
+        s.productCard,
+        inCart != null && s.productCardSelected,
+        disabled && s.productCardDisabled,
+      ]}
+      onPress={onPress}
+      disabled={disabled}
+    >
+      {product.images?.[0]?.url ? (
+        <Image source={{ uri: product.images[0].url }} style={s.productImage} />
+      ) : (
+        <View style={[s.productImage, s.productImagePlaceholder]}>
+          <Text style={s.productPlaceholderText}>
+            {product.name[0]?.toUpperCase()}
+          </Text>
+        </View>
+      )}
+      <Text style={s.productName} numberOfLines={2}>
+        {product.name}
+      </Text>
+      <Text style={s.productPrice}>
+        {sym}
+        {Number(product.ourPrice).toFixed(2)}
+      </Text>
+      {(product.size?.name || product.color?.name) && (
+        <Text style={s.productMeta} numberOfLines={1}>
+          {[product.size?.name, product.color?.name].filter(Boolean).join(" · ")}
+        </Text>
+      )}
+      {inCart != null && (
+        <View style={s.cartBadge}>
+          <Text style={s.cartBadgeText}>{inCart}</Text>
+        </View>
+      )}
+      {disabled && (
+        <View style={s.noStripeBadge}>
+          <Text style={s.noStripeText}>No Stripe</Text>
+        </View>
+      )}
+    </TouchableOpacity>
+  );
+}
+
+function CartLineItem({
+  item,
+  currencySymbol: sym,
+  onIncrement,
+  onDecrement,
+  onRemove,
+  onDiscount,
+}: {
+  item: CartItem;
+  currencySymbol: string;
+  onIncrement: () => void;
+  onDecrement: () => void;
+  onRemove: () => void;
+  onDiscount: () => void;
+}) {
+  const base = Number(item.ourPrice) || 0;
+  const v = item.discountValue ?? 0;
+  const effective =
+    item.discountType === "PERCENT"
+      ? base - base * (v / 100)
+      : item.discountType === "CUSTOM_PRICE"
+      ? Math.max(0.01, v)
+      : base;
+  const lineTotal = effective * item.cartQuantity;
+  const grossTotal = base * item.cartQuantity;
+
+  return (
+    <View style={s.cartItem}>
+      <View style={{ flex: 1 }}>
+        <Text style={s.cartItemName} numberOfLines={2}>
+          {item.name}
+        </Text>
+        {(item.size?.name || item.color?.name) && (
+          <Text style={s.cartItemMeta}>
+            {[item.size?.name, item.color?.name].filter(Boolean).join(" · ")}
+          </Text>
+        )}
+        <View style={s.qtyRow}>
+          <TouchableOpacity style={s.qtyBtn} onPress={onDecrement}>
+            <Text style={s.qtyBtnText}>−</Text>
+          </TouchableOpacity>
+          <Text style={s.qtyText}>{item.cartQuantity}</Text>
+          <TouchableOpacity style={s.qtyBtn} onPress={onIncrement}>
+            <Text style={s.qtyBtnText}>+</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              s.qtyDiscountBtn,
+              item.discountType ? s.qtyDiscountBtnActive : null,
+              item.cartQuantity > 1 && s.qtyDiscountBtnDisabled,
+            ]}
+            disabled={item.cartQuantity > 1}
+            onPress={onDiscount}
+          >
+            <Text
+              style={[
+                s.qtyDiscountText,
+                item.discountType ? s.qtyDiscountTextActive : null,
+              ]}
+            >
+              %
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={s.qtyRemoveBtn} onPress={onRemove}>
+            <Text style={s.qtyRemoveText}>×</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+      <View style={s.cartItemPriceCol}>
+        <Text style={s.cartItemPrice}>
+          {sym}
+          {lineTotal.toFixed(2)}
+        </Text>
+        {effective !== base && (
+          <Text style={s.cartItemPriceStrike}>
+            {sym}
+            {grossTotal.toFixed(2)}
+          </Text>
+        )}
+      </View>
+    </View>
+  );
+}
+
+function PaymentMethodBtn({
+  label,
+  icon,
+  active,
+  color,
+  onPress,
+}: {
+  label: string;
+  icon: string;
+  active: boolean;
+  color: string;
+  onPress: () => void;
+}) {
+  return (
+    <TouchableOpacity
+      style={[s.methodBtn, active && { backgroundColor: color, borderColor: color }]}
+      onPress={onPress}
+    >
+      <Text style={s.methodIcon}>{icon}</Text>
+      <Text style={[s.methodLabel, active && s.methodLabelActive]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
+// ── Picker (generic select-from-list modal) ──
+function PickerModal({
+  visible,
+  title,
+  items,
+  selectedId,
+  onClose,
+  onSelect,
+}: {
+  visible: boolean;
+  title: string;
+  items: { id: string; label: string }[];
+  selectedId: string;
+  onClose: () => void;
+  onSelect: (item: { id: string; label: string }) => void;
+}) {
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={s.modalBackdrop}>
+        <View style={s.modalSheet}>
+          <View style={s.modalHandle} />
+          <Text style={s.modalTitle}>{title}</Text>
+          <ScrollView style={{ maxHeight: 400 }}>
+            {items.map((item) => (
+              <TouchableOpacity
+                key={item.id}
+                style={[s.modalItem, item.id === selectedId && s.modalItemSelected]}
+                onPress={() => onSelect(item)}
+              >
+                <Text
+                  style={[
+                    s.modalItemLabel,
+                    item.id === selectedId && s.modalItemLabelSelected,
+                  ]}
+                >
+                  {item.label}
+                </Text>
+                {item.id === selectedId && <Text style={s.modalItemCheck}>✓</Text>}
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+          <TouchableOpacity style={s.modalCloseBtn} onPress={onClose}>
+            <Text style={s.modalCloseText}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// ── Customer Modal (with search + create) ──
+function CustomerModal({
+  visible,
+  users,
+  selectedId,
+  storeId,
+  onClose,
+  onSelect,
+  onClear,
+  onCreated,
+}: {
+  visible: boolean;
+  users: any[];
+  selectedId: string;
+  storeId: string;
+  onClose: () => void;
+  onSelect: (user: any) => void;
+  onClear: () => void;
+  onCreated: (user: any) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newEmail, setNewEmail] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return users.slice(0, 50);
+    return users
+      .filter(
+        (u) =>
+          u.email?.toLowerCase().includes(q) ||
+          u.name?.toLowerCase().includes(q)
+      )
+      .slice(0, 50);
+  }, [users, query]);
+
+  const handleCreate = async () => {
+    if (!newEmail.trim()) {
+      Alert.alert("Missing", "Email is required");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const user = await createUser({
+        name: newName.trim(),
+        email: newEmail.trim(),
+        storeId,
+      });
+      onCreated(user);
+      setCreating(false);
+      setNewName("");
+      setNewEmail("");
+    } catch (err: any) {
+      console.error("Create user failed:", err);
+      Alert.alert("Error", err?.response?.data ?? "Could not create customer");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        style={s.modalBackdrop}
+      >
+        <View style={s.modalSheet}>
+          <View style={s.modalHandle} />
+          <Text style={s.modalTitle}>Customer</Text>
+
+          {!creating ? (
+            <>
+              <TextInput
+                style={s.modalSearchInput}
+                placeholder="Search by name or email…"
+                placeholderTextColor="#64748b"
+                value={query}
+                onChangeText={setQuery}
+                autoCapitalize="none"
+              />
+              <ScrollView style={{ maxHeight: 280 }}>
+                {filtered.map((u) => (
+                  <TouchableOpacity
+                    key={u.id}
+                    style={[s.modalItem, u.id === selectedId && s.modalItemSelected]}
+                    onPress={() => onSelect(u)}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.modalItemLabel}>{u.name || u.email || "Unknown"}</Text>
+                      {u.name && u.email && (
+                        <Text style={s.modalItemSub}>{u.email}</Text>
+                      )}
+                    </View>
+                    {u.id === selectedId && <Text style={s.modalItemCheck}>✓</Text>}
+                  </TouchableOpacity>
+                ))}
+                {filtered.length === 0 && (
+                  <Text style={s.modalEmpty}>No customers match.</Text>
+                )}
+              </ScrollView>
+
+              <View style={s.modalActionRow}>
+                <TouchableOpacity style={s.modalSecondaryBtn} onPress={() => setCreating(true)}>
+                  <Text style={s.modalSecondaryBtnText}>+ New customer</Text>
+                </TouchableOpacity>
+                {selectedId ? (
+                  <TouchableOpacity style={s.modalSecondaryBtn} onPress={onClear}>
+                    <Text style={s.modalSecondaryBtnText}>Clear</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+            </>
+          ) : (
+            <>
+              <TextInput
+                style={s.modalSearchInput}
+                placeholder="Customer name (optional)"
+                placeholderTextColor="#64748b"
+                value={newName}
+                onChangeText={setNewName}
+              />
+              <TextInput
+                style={s.modalSearchInput}
+                placeholder="Email (required)"
+                placeholderTextColor="#64748b"
+                value={newEmail}
+                onChangeText={setNewEmail}
+                keyboardType="email-address"
+                autoCapitalize="none"
+              />
+              <View style={s.modalActionRow}>
+                <TouchableOpacity
+                  style={s.modalPrimaryBtn}
+                  onPress={handleCreate}
+                  disabled={submitting}
+                >
+                  {submitting ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={s.modalPrimaryBtnText}>Create & select</Text>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity style={s.modalSecondaryBtn} onPress={() => setCreating(false)}>
+                  <Text style={s.modalSecondaryBtnText}>Back</Text>
+                </TouchableOpacity>
+              </View>
+            </>
+          )}
+
+          <TouchableOpacity style={s.modalCloseBtn} onPress={onClose}>
+            <Text style={s.modalCloseText}>Close</Text>
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+// ── Discount Modal (item or order) ──
+function DiscountModal({
+  modal,
+  onClose,
+  onApplyItem,
+  onClearItem,
+  onApplyOrder,
+  onClearOrder,
+  currencySymbol: sym,
+}: {
+  modal: { kind: "item"; product: CartItem } | { kind: "order" } | null;
+  onClose: () => void;
+  onApplyItem: (product: CartItem, type: DiscountType, value: number) => Promise<void>;
+  onClearItem: (product: CartItem) => void;
+  onApplyOrder: (type: DiscountType, value: number) => Promise<void>;
+  onClearOrder: () => void;
+  currencySymbol: string;
+}) {
+  const [type, setType] = useState<DiscountType>("PERCENT");
+  const [value, setValue] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (modal?.kind === "item") {
+      setType(modal.product.discountType ?? "PERCENT");
+      setValue(modal.product.discountValue?.toString() ?? "");
+    } else {
+      setType("PERCENT");
+      setValue("");
+    }
+  }, [modal]);
+
+  if (!modal) return null;
+
+  const apply = async () => {
+    const num = Number(value);
+    if (Number.isNaN(num) || num <= 0) {
+      Alert.alert("Invalid", "Enter a valid amount");
+      return;
+    }
+    if (type === "PERCENT" && num > 100) {
+      Alert.alert("Invalid", "Percent cannot exceed 100");
+      return;
+    }
+    if (type === "CUSTOM_PRICE" && num < 1) {
+      Alert.alert("Invalid", "Price must be at least 1");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      if (modal.kind === "item") await onApplyItem(modal.product, type, num);
+      else await onApplyOrder(type, num);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const isItem = modal.kind === "item";
+
+  return (
+    <Modal visible animationType="slide" transparent onRequestClose={onClose}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        style={s.modalBackdrop}
+      >
+        <View style={s.modalSheet}>
+          <View style={s.modalHandle} />
+          <Text style={s.modalTitle}>
+            {isItem ? `Discount: ${modal.product.name}` : "Order-wide Discount"}
+          </Text>
+          {!isItem && (
+            <Text style={s.modalSubtext}>
+              Applied to every item in the order. Requires all quantities to be 1.
+            </Text>
+          )}
+
+          <Text style={s.modalSectionLabel}>Type</Text>
+          <View style={s.discountTypeRow}>
+            <TouchableOpacity
+              style={[s.discountTypeBtn, type === "PERCENT" && s.discountTypeBtnActive]}
+              onPress={() => setType("PERCENT")}
+            >
+              <Text style={[s.discountTypeText, type === "PERCENT" && s.discountTypeTextActive]}>
+                % off
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.discountTypeBtn, type === "CUSTOM_PRICE" && s.discountTypeBtnActive]}
+              onPress={() => setType("CUSTOM_PRICE")}
+            >
+              <Text style={[s.discountTypeText, type === "CUSTOM_PRICE" && s.discountTypeTextActive]}>
+                Set price
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          <Text style={s.modalSectionLabel}>
+            {type === "PERCENT" ? "Percent off" : `Final ${isItem ? "price" : "total"} (${sym})`}
+          </Text>
+          <TextInput
+            style={s.modalSearchInput}
+            placeholder={type === "PERCENT" ? "10" : "50.00"}
+            placeholderTextColor="#64748b"
+            value={value}
+            onChangeText={setValue}
+            keyboardType="decimal-pad"
+          />
+
+          <View style={s.modalActionRow}>
+            <TouchableOpacity style={s.modalPrimaryBtn} onPress={apply} disabled={submitting}>
+              {submitting ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={s.modalPrimaryBtnText}>Apply</Text>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={s.modalSecondaryBtn}
+              onPress={() => {
+                if (modal.kind === "item") onClearItem(modal.product);
+                else onClearOrder();
+              }}
+            >
+              <Text style={s.modalSecondaryBtnText}>Clear</Text>
+            </TouchableOpacity>
+          </View>
+
+          <TouchableOpacity style={s.modalCloseBtn} onPress={onClose}>
+            <Text style={s.modalCloseText}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+// ── Quick Sale Modal ──
+function QuickSaleModal({
+  visible,
+  sellers,
+  currencySymbol: sym,
+  onClose,
+  onAdd,
+}: {
+  visible: boolean;
+  sellers: any[];
+  currencySymbol: string;
+  onClose: () => void;
+  onAdd: (name: string, price: number, sellerId?: string) => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [price, setPrice] = useState("");
+  const [sellerId, setSellerId] = useState<string | undefined>();
+  const [showSellerPicker, setShowSellerPicker] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (visible) {
+      setName("");
+      setPrice("");
+      setSellerId(undefined);
+    }
+  }, [visible]);
+
+  const handleAdd = async () => {
+    const num = Number(price);
+    if (!name.trim() || Number.isNaN(num) || num <= 0) {
+      Alert.alert("Invalid", "Name and a positive price are required");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await onAdd(name.trim(), num, sellerId);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const selectedSeller = sellers.find((s) => s.id === sellerId);
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        style={s.modalBackdrop}
+      >
+        <View style={s.modalSheet}>
+          <View style={s.modalHandle} />
+          <Text style={s.modalTitle}>Quick Sale</Text>
+          <Text style={s.modalSubtext}>Create a one-off product and add to order</Text>
+
+          <Text style={s.modalSectionLabel}>Name</Text>
+          <TextInput
+            style={s.modalSearchInput}
+            placeholder="Vintage McQueen dress"
+            placeholderTextColor="#64748b"
+            value={name}
+            onChangeText={setName}
+          />
+
+          <Text style={s.modalSectionLabel}>Price ({sym})</Text>
+          <TextInput
+            style={s.modalSearchInput}
+            placeholder="0.00"
+            placeholderTextColor="#64748b"
+            value={price}
+            onChangeText={(v) => /^\d*\.?\d*$/.test(v) && setPrice(v)}
+            keyboardType="decimal-pad"
+          />
+
+          <Text style={s.modalSectionLabel}>Seller (optional)</Text>
+          <TouchableOpacity style={s.pickerRow} onPress={() => setShowSellerPicker(true)}>
+            <Text style={s.pickerLabel}>
+              {selectedSeller
+                ? selectedSeller.storeName || selectedSeller.firstName || "Seller"
+                : "No seller (default)"}
+            </Text>
+            <Text style={s.pickerCaret}>›</Text>
+          </TouchableOpacity>
+
+          <View style={s.modalActionRow}>
+            <TouchableOpacity style={s.modalPrimaryBtn} onPress={handleAdd} disabled={submitting}>
+              {submitting ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={s.modalPrimaryBtnText}>Add to order</Text>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity style={s.modalSecondaryBtn} onPress={onClose}>
+              <Text style={s.modalSecondaryBtnText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <PickerModal
+          visible={showSellerPicker}
+          onClose={() => setShowSellerPicker(false)}
+          title="Select seller"
+          items={[
+            { id: "", label: "No seller" },
+            ...sellers.map((s: any) => ({
+              id: s.id,
+              label: s.storeName || s.firstName || s.email || "Unknown",
+            })),
+          ]}
+          selectedId={sellerId ?? ""}
+          onSelect={(item) => {
+            setSellerId(item.id || undefined);
+            setShowSellerPicker(false);
+          }}
+        />
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Styles
+// ─────────────────────────────────────────────────────────────────
+const s = StyleSheet.create({
+  container: { flex: 1, backgroundColor: "#000" },
+  centerContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "#000",
+    padding: 32,
+  },
+  emptyText: { fontSize: 16, color: "#64748b" },
+
+  // search row
+  searchRow: { flexDirection: "row", paddingHorizontal: 12, paddingTop: 8, gap: 8 },
   searchInput: {
+    flex: 1,
     backgroundColor: "#1e293b",
     borderRadius: 12,
-    padding: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
     fontSize: 16,
     color: "#fff",
     borderWidth: 1,
     borderColor: "#334155",
   },
+  quickSaleBtn: {
+    paddingHorizontal: 14,
+    backgroundColor: "#1e293b",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#334155",
+    justifyContent: "center",
+  },
+  quickSaleBtnText: { color: "#a5b4fc", fontWeight: "700", fontSize: 14 },
 
-  // product grid
-  productGrid: { padding: 8 },
-  productRow: { gap: 8, paddingHorizontal: 8 },
+  // breadcrumb
+  breadcrumb: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    marginHorizontal: 12,
+    marginTop: 8,
+    backgroundColor: "#1e293b",
+    borderRadius: 10,
+  },
+  breadcrumbText: { color: "#a5b4fc", fontSize: 13, fontWeight: "600" },
+
+  // grid
+  gridContainer: { padding: 8, paddingBottom: 100 },
+  gridRow: { gap: 8, paddingHorizontal: 4 },
+
+  // tile card
+  tileCard: {
+    flex: 1,
+    aspectRatio: 1,
+    backgroundColor: "#1e293b",
+    borderRadius: 14,
+    overflow: "hidden",
+    marginBottom: 8,
+    borderWidth: 2,
+    borderColor: "#475569",
+    borderStyle: "dashed",
+  },
+  tileImage: { width: "100%", height: "100%" },
+  tileImagePlaceholder: {
+    backgroundColor: "#334155",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  tilePlaceholderText: { fontSize: 48, fontWeight: "800", color: "#64748b" },
+  tileOverlay: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  tileLabel: { color: "#fff", fontSize: 14, fontWeight: "700", textAlign: "center" },
+  tileBadge: {
+    position: "absolute",
+    top: 8,
+    left: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  tileBadgeText: { color: "#fff", fontSize: 10, fontWeight: "800", letterSpacing: 0.3 },
+
+  // product card
   productCard: {
     flex: 1,
     backgroundColor: "#1e293b",
@@ -472,24 +1639,40 @@ const styles = StyleSheet.create({
     borderColor: "#334155",
   },
   productCardSelected: { borderColor: "#6366f1" },
+  productCardDisabled: { opacity: 0.6 },
   productImage: { width: "100%", aspectRatio: 1, borderRadius: 8, marginBottom: 8 },
-  productImagePlaceholder: { backgroundColor: "#334155", justifyContent: "center", alignItems: "center" },
-  placeholderText: { color: "#64748b", fontSize: 12 },
-  productName: { fontSize: 14, fontWeight: "600", color: "#fff", marginBottom: 4 },
-  productPrice: { fontSize: 16, fontWeight: "700", color: "#a5b4fc" },
-  productDesigner: { fontSize: 12, color: "#64748b", marginTop: 2 },
+  productImagePlaceholder: {
+    backgroundColor: "#334155",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  productPlaceholderText: { fontSize: 32, fontWeight: "700", color: "#64748b" },
+  productName: { fontSize: 13, fontWeight: "600", color: "#fff", marginBottom: 4 },
+  productPrice: { fontSize: 15, fontWeight: "800", color: "#a5b4fc" },
+  productMeta: { fontSize: 11, color: "#64748b", marginTop: 2 },
   cartBadge: {
     position: "absolute",
     top: 6,
     right: 6,
     backgroundColor: "#6366f1",
     borderRadius: 10,
-    width: 20,
-    height: 20,
+    minWidth: 22,
+    height: 22,
     justifyContent: "center",
     alignItems: "center",
+    paddingHorizontal: 6,
   },
-  cartBadgeText: { color: "#fff", fontSize: 11, fontWeight: "700" },
+  cartBadgeText: { color: "#fff", fontSize: 11, fontWeight: "800" },
+  noStripeBadge: {
+    position: "absolute",
+    top: 6,
+    left: 6,
+    backgroundColor: "#dc2626",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  noStripeText: { color: "#fff", fontSize: 9, fontWeight: "700" },
 
   // cart bar
   cartBar: {
@@ -502,72 +1685,163 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
   },
-  cartBarText: { color: "#c7d2fe", fontSize: 14, fontWeight: "600" },
-  cartBarTotal: { color: "#fff", fontSize: 16, fontWeight: "800" },
+  cartBarLabel: { color: "#c7d2fe", fontSize: 13, fontWeight: "600" },
+  cartBarSubLabel: { color: "#fff", fontSize: 16, fontWeight: "800" },
+  cartBarSavings: { fontSize: 12, color: "#bbf7d0", fontWeight: "700" },
+  cartBarAction: { color: "#fff", fontSize: 16, fontWeight: "800" },
 
-  // checkout
-  checkoutScroll: { flex: 1, padding: 20 },
-  checkoutItem: {
+  // checkout - cart items
+  sectionLabel: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#94a3b8",
+    paddingHorizontal: 20,
+    paddingTop: 18,
+    paddingBottom: 8,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  cartItem: {
+    flexDirection: "row",
+    backgroundColor: "#1e293b",
+    borderRadius: 14,
+    padding: 14,
+    marginHorizontal: 16,
+    marginBottom: 8,
+    gap: 12,
+  },
+  cartItemName: { fontSize: 15, fontWeight: "700", color: "#fff" },
+  cartItemMeta: { fontSize: 12, color: "#94a3b8", marginTop: 2 },
+  cartItemPriceCol: { alignItems: "flex-end", justifyContent: "center" },
+  cartItemPrice: { fontSize: 16, fontWeight: "800", color: "#a5b4fc" },
+  cartItemPriceStrike: {
+    fontSize: 12,
+    color: "#64748b",
+    textDecorationLine: "line-through",
+    marginTop: 2,
+  },
+
+  // qty row
+  qtyRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 10 },
+  qtyBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: "#475569",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  qtyBtnText: { color: "#fff", fontSize: 16, fontWeight: "700" },
+  qtyText: { color: "#fff", fontSize: 14, fontWeight: "700", minWidth: 20, textAlign: "center" },
+  qtyDiscountBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: "#475569",
+    justifyContent: "center",
+    alignItems: "center",
+    marginLeft: 4,
+  },
+  qtyDiscountBtnActive: { backgroundColor: "#fbbf24", borderColor: "#fbbf24" },
+  qtyDiscountBtnDisabled: { opacity: 0.3 },
+  qtyDiscountText: { color: "#fbbf24", fontSize: 14, fontWeight: "800" },
+  qtyDiscountTextActive: { color: "#000" },
+  qtyRemoveBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: "#475569",
+    justifyContent: "center",
+    alignItems: "center",
+    marginLeft: "auto",
+  },
+  qtyRemoveText: { color: "#ef4444", fontSize: 16, fontWeight: "800" },
+
+  // full-width helper buttons
+  fullWidthBtn: {
+    backgroundColor: "#1e293b",
+    marginHorizontal: 16,
+    marginTop: 4,
+    paddingVertical: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#334155",
+    alignItems: "center",
+  },
+  fullWidthBtnDisabled: { opacity: 0.4 },
+  fullWidthBtnText: { color: "#fbbf24", fontSize: 13, fontWeight: "700" },
+  helperText: { color: "#64748b", fontSize: 11, marginTop: 4 },
+
+  // totals
+  totalsBlock: { paddingHorizontal: 20, paddingTop: 18 },
+  totalRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  totalLabel: { fontSize: 14, color: "#94a3b8" },
+  totalValue: { fontSize: 14, color: "#94a3b8" },
+  totalValueGreen: { fontSize: 14, color: "#4ade80", fontWeight: "700" },
+  grandTotalLabel: { fontSize: 22, fontWeight: "800", color: "#fff" },
+  grandTotalValue: { fontSize: 22, fontWeight: "800", color: "#fff" },
+
+  // picker rows
+  pickerRow: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: "#1e293b",
+    marginHorizontal: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
     borderRadius: 12,
-    padding: 16,
-    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: "#334155",
+    marginBottom: 4,
   },
-  checkoutItemName: { fontSize: 15, fontWeight: "600", color: "#fff" },
-  checkoutItemMeta: { fontSize: 13, color: "#94a3b8", marginTop: 2 },
-  checkoutItemTotal: { fontSize: 16, fontWeight: "700", color: "#a5b4fc" },
-
-  // totals
-  totalsSection: { marginTop: 16, marginBottom: 20 },
-  totalRow: { flexDirection: "row", justifyContent: "space-between", marginBottom: 8 },
-  totalLabel: { fontSize: 14, color: "#94a3b8" },
-  totalValue: { fontSize: 14, color: "#94a3b8" },
-  grandTotalLabel: { fontSize: 20, fontWeight: "800", color: "#fff" },
-  grandTotalValue: { fontSize: 20, fontWeight: "800", color: "#fff" },
+  pickerLabel: { color: "#fff", fontSize: 15, flex: 1 },
+  pickerCaret: { color: "#94a3b8", fontSize: 22, marginLeft: 8 },
 
   // payment method
-  paymentMethodRow: { flexDirection: "row", gap: 8, marginBottom: 20 },
+  methodRow: { flexDirection: "row", paddingHorizontal: 16, gap: 8 },
   methodBtn: {
     flex: 1,
     paddingVertical: 14,
     borderRadius: 12,
     borderWidth: 2,
     borderColor: "#334155",
+    backgroundColor: "#1e293b",
     alignItems: "center",
   },
-  methodBtnActive: { borderColor: "#6366f1", backgroundColor: "#312e81" },
-  methodBtnCashActive: { borderColor: "#059669", backgroundColor: "#064e3b" },
-  methodText: { fontSize: 15, fontWeight: "600", color: "#64748b" },
-  methodTextActive: { color: "#fff" },
+  methodIcon: { fontSize: 22, marginBottom: 4 },
+  methodLabel: { color: "#94a3b8", fontWeight: "700", fontSize: 13 },
+  methodLabelActive: { color: "#fff" },
 
-  // staff / chips
-  sectionTitle: { fontSize: 14, fontWeight: "600", color: "#94a3b8", marginBottom: 8 },
-  chipScroll: { marginBottom: 16 },
-  chip: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
-    backgroundColor: "#1e293b",
-    marginRight: 8,
-    borderWidth: 1.5,
-    borderColor: "#334155",
-  },
-  chipActive: { borderColor: "#6366f1", backgroundColor: "#312e81" },
-  chipText: { fontSize: 14, color: "#94a3b8", fontWeight: "500" },
-  chipTextActive: { color: "#fff" },
-
-  // warning
-  warningBox: {
+  // warn / error boxes
+  warnBox: {
     backgroundColor: "#422006",
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 16,
+    marginHorizontal: 16,
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: "#854d0e",
   },
-  warningText: { color: "#fbbf24", fontSize: 13, textAlign: "center" },
+  warnText: { color: "#fbbf24", fontSize: 13, textAlign: "center" },
+  errorBox: {
+    backgroundColor: "#450a0a",
+    marginHorizontal: 16,
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#7f1d1d",
+  },
+  errorTitle: { color: "#fca5a5", fontSize: 14, fontWeight: "800", textAlign: "center" },
+  errorMsg: { color: "#fecaca", fontSize: 12, textAlign: "center", marginTop: 4 },
 
   // charge bar
   chargeBar: { padding: 20, paddingBottom: 36, backgroundColor: "#0f172a" },
@@ -578,26 +1852,174 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 10,
   },
+  chargeButtonCash: { backgroundColor: "#059669" },
+  chargeButtonQr: { backgroundColor: "#7c3aed" },
   chargeButtonDisabled: { opacity: 0.4 },
-  chargeButtonText: { color: "#fff", fontSize: 18, fontWeight: "800" },
-  backButton: { alignItems: "center", padding: 8 },
-  backButtonText: { color: "#6366f1", fontSize: 14, fontWeight: "600" },
+  chargeButtonText: { color: "#fff", fontSize: 17, fontWeight: "800" },
+  backLink: { color: "#94a3b8", fontSize: 13, textAlign: "center" },
 
   // success
-  successIcon: { fontSize: 64, color: "#22c55e", marginBottom: 16 },
-  successTitle: { fontSize: 24, fontWeight: "800", color: "#fff", marginBottom: 8 },
-  successAmount: { fontSize: 32, fontWeight: "800", color: "#a5b4fc", marginBottom: 32 },
-  primaryButton: {
+  successContainer: {
+    flex: 1,
+    backgroundColor: "#000",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 32,
+  },
+  successCheck: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    backgroundColor: "#064e3b",
+    justifyContent: "center",
+    alignItems: "center",
+    marginBottom: 16,
+  },
+  successCheckIcon: { fontSize: 56, color: "#22c55e", fontWeight: "900" },
+  successTitle: { fontSize: 22, fontWeight: "800", color: "#fff", marginBottom: 4 },
+  successAmount: { fontSize: 40, fontWeight: "900", color: "#4ade80", marginBottom: 14 },
+  successMetaRow: { flexDirection: "row", gap: 8, marginBottom: 12 },
+  successMetaPill: {
+    backgroundColor: "#1e293b",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+  },
+  successMetaText: { color: "#a5b4fc", fontSize: 12, fontWeight: "700" },
+  successSubtext: { color: "#64748b", fontSize: 12, marginBottom: 28 },
+
+  primaryBtn: {
     backgroundColor: "#6366f1",
     borderRadius: 14,
     paddingVertical: 16,
     paddingHorizontal: 48,
   },
-  primaryButtonText: { color: "#fff", fontSize: 16, fontWeight: "700" },
+  primaryBtnText: { color: "#fff", fontSize: 16, fontWeight: "800" },
+  secondaryBtn: {
+    borderWidth: 1,
+    borderColor: "#7f1d1d",
+    borderRadius: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 32,
+    marginTop: 16,
+  },
+  secondaryBtnText: { color: "#fca5a5", fontSize: 14, fontWeight: "700" },
 
-  // processing
-  processingText: { fontSize: 18, fontWeight: "700", color: "#fff", marginTop: 20 },
-  processingSubtext: { fontSize: 14, color: "#94a3b8", marginTop: 8 },
+  processingTitle: { fontSize: 18, fontWeight: "800", color: "#fff", marginTop: 20 },
+  processingSubtext: {
+    fontSize: 13,
+    color: "#94a3b8",
+    marginTop: 8,
+    textAlign: "center",
+    maxWidth: 280,
+  },
 
-  emptyText: { fontSize: 16, color: "#64748b" },
+  // qr
+  qrTitle: { fontSize: 18, fontWeight: "700", color: "#fff", marginBottom: 24 },
+  qrFrame: {
+    backgroundColor: "#fff",
+    padding: 12,
+    borderRadius: 16,
+    marginBottom: 20,
+  },
+  qrImage: { width: 240, height: 240 },
+  qrAmount: { fontSize: 32, fontWeight: "900", color: "#a78bfa", marginBottom: 16 },
+  qrPollingRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  qrPollingText: { color: "#a78bfa", fontSize: 13, fontWeight: "600" },
+
+  // modals
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    justifyContent: "flex-end",
+  },
+  modalSheet: {
+    backgroundColor: "#0f172a",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 20,
+    paddingTop: 8,
+    paddingBottom: 32,
+  },
+  modalHandle: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "#475569",
+    alignSelf: "center",
+    marginBottom: 16,
+  },
+  modalTitle: { fontSize: 20, fontWeight: "800", color: "#fff", marginBottom: 4 },
+  modalSubtext: { fontSize: 12, color: "#94a3b8", marginBottom: 12 },
+  modalSectionLabel: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#94a3b8",
+    marginTop: 12,
+    marginBottom: 8,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  modalSearchInput: {
+    backgroundColor: "#1e293b",
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 15,
+    color: "#fff",
+    borderWidth: 1,
+    borderColor: "#334155",
+    marginBottom: 8,
+  },
+  modalItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 14,
+    paddingHorizontal: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: "#1e293b",
+  },
+  modalItemSelected: { backgroundColor: "rgba(99,102,241,0.1)" },
+  modalItemLabel: { fontSize: 15, color: "#fff", flex: 1 },
+  modalItemLabelSelected: { color: "#a5b4fc", fontWeight: "700" },
+  modalItemSub: { fontSize: 12, color: "#94a3b8", marginTop: 2 },
+  modalItemCheck: { fontSize: 18, color: "#6366f1", fontWeight: "800" },
+  modalEmpty: { color: "#64748b", textAlign: "center", paddingVertical: 24 },
+
+  modalActionRow: { flexDirection: "row", gap: 8, marginTop: 16 },
+  modalPrimaryBtn: {
+    flex: 1,
+    backgroundColor: "#6366f1",
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: "center",
+  },
+  modalPrimaryBtnText: { color: "#fff", fontSize: 15, fontWeight: "800" },
+  modalSecondaryBtn: {
+    flex: 1,
+    backgroundColor: "#1e293b",
+    borderWidth: 1,
+    borderColor: "#334155",
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: "center",
+  },
+  modalSecondaryBtnText: { color: "#94a3b8", fontSize: 14, fontWeight: "700" },
+  modalCloseBtn: { paddingVertical: 12, alignItems: "center", marginTop: 8 },
+  modalCloseText: { color: "#64748b", fontSize: 13, fontWeight: "600" },
+
+  // discount type toggle
+  discountTypeRow: { flexDirection: "row", gap: 8 },
+  discountTypeBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: "#334155",
+    backgroundColor: "#1e293b",
+    alignItems: "center",
+  },
+  discountTypeBtnActive: { borderColor: "#fbbf24", backgroundColor: "#422006" },
+  discountTypeText: { color: "#94a3b8", fontWeight: "700" },
+  discountTypeTextActive: { color: "#fbbf24" },
 });
